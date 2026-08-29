@@ -1,0 +1,17 @@
+{
+  "name": "redini-atelier",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Redini: a Human-in-the-Loop trust layer for WebMCP — demonstrated by Atelier, an agent-native design studio.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0",
+    "vite": "^7.0.0",
+    "webmcp-types": "^0.1.5"
+  }
+}

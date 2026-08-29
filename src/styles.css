@@ -1,0 +1,89 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #f4f2ee;
+  color: #1c1c1c;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid #ddd8d0;
+}
+
+header h1 { margin: 0; font-size: 1.3rem; }
+
+.status { font-size: 0.8rem; color: #777; }
+.status.ok { color: #1a7f37; }
+.status.ko { color: #b42318; }
+
+main {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 1rem;
+  padding: 1.5rem;
+}
+
+#canvas-area { display: flex; flex-direction: column; gap: 1rem; }
+
+.flyer {
+  min-height: 380px;
+  background: #fffdf8;
+  border: 1px solid #ddd8d0;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem;
+}
+
+.flyer h2 { font-size: 2rem; margin: 0 0 0.5rem; }
+.flyer p { margin: 0.25rem 0; color: #555; }
+
+.templates { background: #fff; border: 1px solid #ddd8d0; border-radius: 8px; padding: 1rem; }
+.templates ul { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.templates li {
+  border: 1px solid #ccc5b9;
+  border-radius: 6px;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.templates li:hover { background: #f0ede6; }
+
+#guardrail-panel {
+  background: #fff;
+  border: 1px solid #ddd8d0;
+  border-radius: 8px;
+  padding: 1rem;
+  align-self: start;
+}
+
+#guardrail-panel h3 { margin-top: 0; font-size: 1rem; }
+#guardrail-panel h4 { margin: 1rem 0 0.25rem; font-size: 0.85rem; text-transform: uppercase; color: #777; }
+
+#approval-queue .empty { color: #999; font-size: 0.85rem; }
+
+#activity-log { list-style: none; margin: 0; padding: 0; font-size: 0.8rem; color: #555; }
+#activity-log li { padding: 0.2rem 0; border-bottom: 1px solid #f0ede6; }
+
+#undo-btn {
+  margin-top: 1rem;
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ccc5b9;
+  border-radius: 6px;
+  background: #f0ede6;
+  cursor: pointer;
+}
+#undo-btn:disabled { opacity: 0.5; cursor: not-allowed; }

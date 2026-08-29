@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Atelier — an agent-native design studio</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Atelier</h1>
+      <span id="webmcp-status" class="status">checking WebMCP…</span>
+    </header>
+    <main>
+      <section id="canvas-area">
+        <div id="flyer" class="flyer">
+          <h2 id="flyer-title">Your flyer title</h2>
+          <p id="flyer-subtitle">A subtitle goes here</p>
+          <p id="flyer-date">Date &amp; place</p>
+        </div>
+        <div id="templates" class="templates">
+          <h3>Templates</h3>
+          <ul id="template-list"></ul>
+        </div>
+      </section>
+      <aside id="guardrail-panel">
+        <h3>Redini — agent control panel</h3>
+        <div id="approval-queue">
+          <p class="empty">No pending agent actions.</p>
+        </div>
+        <h4>Activity log</h4>
+        <ul id="activity-log"></ul>
+        <button id="undo-btn" disabled>Undo last agent action</button>
+      </aside>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
