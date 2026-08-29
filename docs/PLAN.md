@@ -9,12 +9,13 @@ Judging: 4-21 settembre · Vincitori: ~23 settembre
 Ipotesi: ~8-10 ore/giorno di lavoro effettivo. Ogni giorno ha un criterio di "fatto" verificabile.
 
 ### Giorno 1 — 29/08: fondamenta + spike (IL giorno più importante)
-- [ ] Scaffold Vite + TS, repo GitHub privato→pubblico con LICENZA MIT, deploy automatico Netlify collegato (funziona anche senza crediti)
-- [ ] **SPIKE: matrice di verifica browser** (TECH-DESIGN §6, test 1-7) in ChatGPT in-app browser e Chrome+flag
-- [ ] Primo tool end-to-end: `list_templates` chiamato dall'agente con risposta reale
-- [ ] Decisione Go/No-Go su API dichiarativa in base agli esiti
+- [x] Scaffold Vite + TS con build verde, repo GitHub `cioffiAI/redini-atelier` (privato, pubblica il giorno 4) con LICENZA MIT, struttura src/ (redini/ + atelier/), tool spike `list_templates` già registrato nel codice
+- [x] Documenti di progetto: CONCEPT, TECHNICAL-DESIGN, PLAN, SPIKE
+- [ ] **Azione utente**: installare ChatGPT Desktop + Chrome 149+, attivare flag, deploy su Netlify (docs/SPIKE.md §0)
+- [ ] **SPIKE: eseguire i 6 test** di docs/SPIKE.md in entrambi i browser e compilare la tabella risultati
+- [ ] Decisione Go/No-Go su API dichiarativa e approvazione bloccante in base agli esiti
 
-**Fatto quando**: un tool gira davvero nel browser di ChatGPT sul sito deployato su Netlify.
+**Fatto quando**: un tool gira davvero nel browser di ChatGPT sul sito deployato su Netlify, tabella spike compilata.
 
 ### Giorno 2 — 30/08: il cuore (libreria redini)
 - [ ] `registerGuardedTool()` con mode safe/approval-required
