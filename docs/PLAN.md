@@ -17,14 +17,18 @@ Ipotesi: ~8-10 ore/giorno di lavoro effettivo. Ogni giorno ha un criterio di "fa
 
 **Fatto quando**: un tool gira davvero nel browser di ChatGPT sul sito deployato su Netlify, tabella spike compilata.
 
-### Giorno 2 — 30/08: il cuore (libreria redini, semantica transazionale)
-- [ ] `registerGuardedTool()` con mode safe/transaction (args = stringa JSON: firma Chrome verificata)
-- [ ] Staging area (card con descrizione umana, parametri editabili, Commit/Modifica/Rifiuta)
-- [ ] Receipts (txId, undoToken) + SnapshotStore + rollback funzionante
-- [ ] Provenance / audit trail
-- [ ] Test: agente propone → commit; propone → edit → commit; propone → decline; rollback
+### Giorno 2 — 30/08: il cuore (libreria redini, semantica transazionale) — COMPLETATO
+- [x] `registerTransactionalTool()` / `registerSafeTool()` / `register()` con mode safe/transaction (args = stringa JSON: firma Chrome verificata)
+- [x] Transazioni first-class: `Transaction {id, proposedInput, committedInput, stateVersion, status, proposedAt, committedAt}` con lifecycle `proposed → reviewing → committed | declined → undone (+ stale | failed)`
+- [x] Staging area DOM (card con preview, parametri editabili via JSON, Commit/Modifica/Rifiuta) + adapter InMemory per test
+- [x] Receipts (txId, undoToken, stateBefore/stateAfter) + SnapshotStore + rollback single-use
+- [x] Stale guard: contatore mutazioni interno + `getStateVersion` opzionale → `STALE_TRANSACTION`
+- [x] Provenance / audit trail (kind, txId, humanEdited)
+- [x] 14/14 test gate passati (`npm test`, vitest) — inclusi: decline senza execute, fallimento senza false receipt, undo esatto, double-undo deterministico, due transazioni concorrenti, AbortSignal in attesa, promessa WebMCP chiusa solo dopo decisione, `proposedInput !== committedInput`
+- [x] E2E playground nel browser reale (`scripts/playground-e2e.mjs`): proposta → commit → receipt → undo → decline → audit, tutto OK
+- [x] API che emette sempre outcome strutturato all'agente (committed/declined_by_user/cancelled/stale_transaction/execute_failed)
 
-**Fatto quando**: le quattro vie (commit / modifica+commit / rifiuto / rollback) producono receipt coerenti nell'audit trail.
+**Fatto**: le quattro vie (commit / modifica+commit / rifiuto / rollback) producono receipt coerenti nell'audit trail — verificato in unit test E nel browser.
 
 ### Giorno 3 — 31/08: Atelier (l'app)
 - [ ] Canvas flyer con i 6 campi + 4 template mock

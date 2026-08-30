@@ -73,6 +73,46 @@ main {
 .spike-zone input { padding: 0.35rem; border: 1px solid #ccc5b9; border-radius: 4px; }
 .spike-zone button { padding: 0.45rem 0.8rem; border: 1px solid #ccc5b9; border-radius: 4px; background: #f0ede6; cursor: pointer; }
 
+.playground {
+  background: #eef4ff;
+  border: 1px solid #b9c9e8;
+  border-radius: 8px;
+  padding: 1rem;
+}
+.playground h3 { margin: 0 0 0.5rem; font-size: 0.9rem; color: #2a4d8f; }
+.playground p { margin: 0.3rem 0; font-size: 0.85rem; }
+.playground-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.playground-actions button { padding: 0.45rem 0.8rem; border: 1px solid #b9c9e8; border-radius: 4px; background: #fff; cursor: pointer; }
+.playground .hint { color: #55688f; }
+
+.tx-card {
+  border: 1px solid #e0dbd2;
+  border-radius: 6px;
+  padding: 0.6rem;
+  margin-bottom: 0.6rem;
+  background: #fffdf8;
+}
+.tx-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+.tx-chip {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid #ccc5b9;
+  color: #555;
+  text-transform: uppercase;
+}
+.tx-proposed { border-color: #b9c9e8; background: #eef4ff; }
+.tx-reviewing { border-color: #d4c96a; background: #fffbe6; }
+.tx-committed { border-color: #9dc9a5; background: #f0faf1; }
+.tx-declined, .tx-undone, .tx-stale, .tx-failed { opacity: 0.75; }
+.tx-io { font-size: 0.72rem; font-family: ui-monospace, monospace; color: #555; margin: 0.15rem 0; }
+.tx-preview { font-size: 0.78rem; color: #1c1c1c; margin: 0.3rem 0; }
+.tx-edit { width: 100%; min-height: 70px; font-family: ui-monospace, monospace; font-size: 0.75rem; margin: 0.3rem 0; }
+.tx-actions { display: flex; gap: 0.4rem; margin-top: 0.4rem; }
+.tx-actions button { padding: 0.3rem 0.6rem; font-size: 0.78rem; border: 1px solid #ccc5b9; border-radius: 4px; background: #fff; cursor: pointer; }
+.tx-commit { background: #e6f4ea !important; border-color: #9dc9a5 !important; }
+.tx-decline { background: #fdeceb !important; border-color: #e5a09a !important; }
+
 #guardrail-panel {
   background: #fff;
   border: 1px solid #ddd8d0;

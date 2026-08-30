@@ -1,5 +1,7 @@
 import './styles.css';
 import { templates } from './atelier/templates';
+import { createGuard } from './redini/index';
+import { createDomPanel } from './redini/ui/dom-panel';
 
 /**
  * Day-1 target (SPIKE): prove the WebMCP pipeline end-to-end.
@@ -46,8 +48,19 @@ async function bootstrap(): Promise<void> {
   statusEl.textContent = 'WebMCP available';
   statusEl.classList.add('ok');
 
-  // SPIKE test 1: one real tool, end-to-end.
-  await mc.registerTool({
+  // ---- Redini guard: transactional layer over document.modelContext ----
+  const guard = createGuard({
+    ui: createDomPanel({
+      queueEl: document.getElementById('approval-queue')!,
+      logEl: document.getElementById('activity-log')!,
+      undoBtn: document.getElementById('undo-btn') as HTMLButtonElement,
+    }),
+    modelContext: mc,
+  });
+  (window as unknown as { __guard: unknown }).__guard = guard; // console access for testing
+
+  // Safe tool (read-only): executes immediately.
+  guard.registerSafeTool({
     name: 'list_templates',
     description:
       'Lists the available flyer templates. Returns id, name and style tags for each template. Read-only.',
@@ -78,6 +91,47 @@ async function bootstrap(): Promise<void> {
       };
     },
   });
+
+  // ---- Playground fixture (domain-agnostic counter) ----
+  let count = 0;
+  const counterEl = document.getElementById('counter-value')!;
+  const renderCount = (): void => {
+    counterEl.textContent = String(count);
+  };
+
+  guard.registerTransactionalTool({
+    name: 'set_count',
+    description:
+      'Proposes a new value for the demo counter. The human inspects, edits or commits the proposal — nothing changes until they commit.',
+    inputSchema: {
+      type: 'object',
+      properties: { count: { type: 'number', description: 'New counter value' } },
+      required: ['count'],
+    },
+    preview: (input) => ({ summary: `counter → ${String(input.count)}`, diff: { from: count, to: input.count } }),
+    execute: (input) => {
+      count = input.count as number;
+      renderCount();
+      return { count };
+    },
+    snapshot: () => count,
+    restore: (s) => {
+      count = s as number;
+      renderCount();
+    },
+  });
+
+  const proposeBtn = (id: string, value: number): void => {
+    document.getElementById(id)?.addEventListener('click', () => {
+      guard
+        .dispatch('set_count', { count: value })
+        .then((o) => logEntry(`agent outcome: ${JSON.stringify(o)}`))
+        .catch((e: unknown) => logEntry(`dispatch error: ${String(e)}`));
+    });
+  };
+  proposeBtn('propose-42', 42);
+  proposeBtn('propose-7', 7);
+  renderCount();
 
   // ---- SPIKE TEST 2: tool resolved manually from the console ----
   let slowResolve: (v: unknown) => void = () => {};
