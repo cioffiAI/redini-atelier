@@ -139,6 +139,12 @@ async function bootstrap(): Promise<void> {
   proposeBtn('propose-7', 7);
   renderCount();
 
+  // Diagnostics: show how many tools are actually registered (visible without devtools).
+  await new Promise((r) => setTimeout(r, 150));
+  const registered = await mc.getTools().catch(() => [] as { name: string }[]);
+  statusEl.textContent = `WebMCP available · ${registered.length} tools`;
+  logEntry(`tools registered: ${registered.map((t) => t.name).join(', ') || 'NONE'}`);
+
   // ---- SPIKE TEST 2: tool resolved manually from the console ----
   let slowResolve: (v: unknown) => void = () => {};
   (window as unknown as { resolveSlow: (v: unknown) => void }).resolveSlow = (v) => slowResolve(v);
