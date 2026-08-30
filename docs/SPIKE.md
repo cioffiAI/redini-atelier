@@ -7,12 +7,14 @@ Obiettivo: verificare su TERRA REALE che la pipeline WebMCP si comporti come pre
 
 | # | Azione | Verifica |
 |---|---|---|
-| 0.1 | Installare **ChatGPT Desktop** da https://chatgpt.com/download (NON presente sul Mac — verificato) | L'app si apre e fa il login |
-| 0.2 | Installare **Google Chrome** (NON presente sul Mac — verificato). Serve versione **149+**: scaricabile da google.com/chrome. Se la stable fosse <149, usare Chrome Beta/Canary | Aprire chrome://version e segnare la versione |
+| 0.1 | Installare **ChatGPT Desktop** da https://chatgpt.com/download | L'app si apre e fa il login |
+| 0.2 | Installare **Google Chrome**. Serve versione **149+**: scaricabile da google.com/chrome. Se la stable fosse <149, usare Chrome Beta/Canary | Aprire chrome://version e segnare la versione |
 | 0.3 | In Chrome: aprire `chrome://flags/#enable-webmcp-testing` → **Enabled** → Riavvia | Il flag è presente ed enabled |
 | 0.4 | Deploy della scaffold su **Netlify**: npm run build → trascinare la cartella `dist/` su https://app.netlify.com/drop (oppure collegare il repo GitHub da app.netlify.com) | URL pubblico https://…netlify.app risponde |
 
-**Nota su localhost**: provare PRIMA `npm run dev` e aprire http://localhost:5173 nel browser in-app di ChatGPT (potrebbe funzionare perché l'app è locale). Se non carica, usare l'URL Netlify. Registrare l'esito: ci serve sapere se il loop di sviluppo sarà rapido o servirà un deploy per ogni test.
+> **Stato 29/08 pomeriggio**: 0.1 e 0.2 FATTE (ChatGPT installato+login; utente conferma Chrome con flag MCP testing abilitato). 0.4 ancora da fare.
+> I 6 test NON richiedono codice temporaneo: tutti i tool di test (slow_tool, test_booking form, add_note, temp_echo) sono già nell'app (commit `spike tools`).
+> L'ambiente localhost è già in funzione: `npm run dev` gira su http://localhost:5173 (avviato in background, log in /tmp/vite-dev.log).
 
 ## 1. Come eseguire i test
 

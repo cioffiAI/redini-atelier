@@ -11,6 +11,19 @@ import { templates } from './atelier/templates';
 const statusEl = document.getElementById('webmcp-status')!;
 const templateListEl = document.getElementById('template-list')!;
 
+function logEntry(text: string): void {
+  const ul = document.getElementById('activity-log')!;
+  const li = document.createElement('li');
+  li.textContent = `${new Date().toLocaleTimeString()} — ${text}`;
+  ul.prepend(li);
+}
+
+function logRegistrationError(err: unknown): void {
+  console.error('Tool registration failed:', err);
+  logEntry(`REGISTRATION ERROR: ${String(err)}`);
+}
+
+
 function renderTemplates(): void {
   templateListEl.innerHTML = '';
   for (const t of templates) {
@@ -65,6 +78,121 @@ async function bootstrap(): Promise<void> {
       };
     },
   });
+
+  // ---- SPIKE TEST 2: tool resolved manually from the console ----
+  let slowResolve: (v: unknown) => void = () => {};
+  (window as unknown as { resolveSlow: (v: unknown) => void }).resolveSlow = (v) => slowResolve(v);
+
+  void mc
+    .registerTool({
+      name: 'slow_tool',
+      description:
+        'Diagnostic tool: it stays pending until the user resolves it from the page (window.resolveSlow). Call it only if the user asks explicitly.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => {
+        const started = Date.now();
+        const result = await new Promise((res) => {
+          slowResolve = res;
+        });
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `slow_tool resolved after ${Math.round((Date.now() - started) / 1000)}s with: ${JSON.stringify(result)}`,
+            },
+          ],
+        };
+      },
+    })
+    .catch(logRegistrationError);
+
+  // ---- SPIKE TESTS 3+4: declarative form with respondWith ----
+  const testForm = document.getElementById('test-form') as HTMLFormElement | null;
+  testForm?.addEventListener('submit', (e) => {
+    const ev = e as SubmitEvent & { agentInvoked?: boolean; respondWith?: (p: Promise<unknown>) => void };
+    logEntry(`test-form submit — agentInvoked: ${ev.agentInvoked === true}`);
+    if (ev.agentInvoked) {
+      e.preventDefault();
+      const data = new FormData(testForm);
+      ev.respondWith?.(
+        Promise.resolve({
+          status: 'booked',
+          guest: data.get('guest_name'),
+          people: data.get('people'),
+        }),
+      );
+      logEntry(`respondWith sent: booked for ${String(data.get('guest_name'))}`);
+    }
+  });
+
+  // ---- SPIKE TEST 5: dynamic tool registration ----
+  let note = '';
+  let noteCounter = 0;
+
+  void mc
+    .registerTool({
+      name: 'add_note',
+      description:
+        'Adds a note to the page. It also registers a read_note tool the agent can call to read the note back.',
+      inputSchema: {
+        type: 'object',
+        properties: { text: { type: 'string', description: 'The note text' } },
+        required: ['text'],
+      },
+      execute: async (input: Record<string, unknown>) => {
+        note = String(input.text ?? '');
+        noteCounter += 1;
+        await mc.registerTool({
+          name: `read_note_${noteCounter}`,
+          description: `Returns the text of note number ${noteCounter}. Read-only.`,
+          inputSchema: { type: 'object', properties: {} },
+          annotations: { readOnlyHint: true },
+          execute: async () => ({
+            content: [{ type: 'text' as const, text: `note ${noteCounter}: ${note}` }],
+          }),
+        });
+        return {
+          content: [
+            { type: 'text' as const, text: `Note saved. A tool named read_note_${noteCounter} is now available to read it.` },
+          ],
+        };
+      },
+    })
+    .catch(logRegistrationError);
+
+  // ---- SPIKE TEST 6: unregistration via AbortController ----
+  const tempController = new AbortController();
+
+  void mc
+    .registerTool(
+      {
+        name: 'temp_echo',
+        description: 'Echoes its input. Temporary tool, used to test unregistration.',
+        inputSchema: {
+          type: 'object',
+          properties: { message: { type: 'string', description: 'Text to echo' } },
+          required: ['message'],
+        },
+        execute: async (input: Record<string, unknown>) => ({
+          content: [{ type: 'text' as const, text: `echo: ${String(input.message)}` }],
+        }),
+      },
+      { signal: tempController.signal },
+    )
+    .catch(logRegistrationError);
+
+  void mc
+    .registerTool({
+      name: 'dispose_temp',
+      description: 'Unregisters the temp_echo tool. Read-only.',
+      inputSchema: { type: 'object', properties: {} },
+      annotations: { readOnlyHint: true },
+      execute: async () => {
+        tempController.abort();
+        return { content: [{ type: 'text' as const, text: 'temp_echo has been unregistered' }] };
+      },
+    })
+    .catch(logRegistrationError);
 }
 
 void bootstrap();

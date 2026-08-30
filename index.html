@@ -22,6 +22,14 @@
           <h3>Templates</h3>
           <ul id="template-list"></ul>
         </div>
+        <div class="spike-zone">
+          <h3>Spike test zone (temporary)</h3>
+          <form toolname="test_booking" tooldescription="Books a table for testing the declarative WebMCP form API. The agent fills the fields, the user reviews and submits." id="test-form">
+            <label>Guest name <input name="guest_name" toolparamdescription="Name of the guest" required></label>
+            <label>People <input name="people" type="number" min="1" max="12" toolparamdescription="Number of people" required></label>
+            <button type="submit">Book</button>
+          </form>
+        </div>
       </section>
       <aside id="guardrail-panel">
         <h3>Redini — agent control panel</h3>
