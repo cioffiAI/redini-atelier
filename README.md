@@ -22,35 +22,32 @@ preview (ghost on the canvas) → amend parameters → skip operations (cherry-p
       ↓
 atomic commit of the accepted subset
       ↓
-RECEIPT — INTENDED / AMENDED BY HUMAN / SKIPPED BY HUMAN / APPLIED
+RECEIPT — INTENDED / AMENDED BY YOU / SKIPPED BY YOU / APPLIED · STATE v→v
       ↓
-deterministic undo (inverse operations, not snapshots)
+Undo ↔ Redo (deterministic — inverse operations, editor-style history:
+           undoStack/redoStack, and a new commit invalidates the redo future)
 ```
+
+Undo/redo is one keyboard shortcut away: **⌘/Ctrl+Z** undoes, **⇧⌘/Ctrl+Z** (or **Ctrl+Y**) redoes — the app never hijacks undo inside text inputs.
 
 Nothing touches application state until the human commits. The agent's `executeTool` call stays **pending** for the whole negotiation and resolves with a direct structured result: `{status, changeSetId, appliedCount, amendedCount, skippedCount, undoAvailable}` — it never dies, never throws an unhandled rejection.
 
 Example receipt (what the panel renders after a commit):
 
 ```
-RECEIPT #a1b2c3d4
+INTENDED — 3 proposed by the agent        Title · "Ghost Title"
+                                          Background · #224466
+                                          Logo position · 40, 40
 
-INTENDED
-  op-1. title → "Ghost Title"
-  op-2. background fill → #224466
-  op-3. logo → (40, 40)
+AMENDED BY YOU — 1 changed by you         Title · "Ghost Title" → "Amended Title"
 
-AMENDED BY HUMAN
-  op-1. title → "Amended Title"   (was: title → "Ghost Title")
+SKIPPED BY YOU — 1 excluded               Background · #224466
 
-SKIPPED BY HUMAN
-  op-2. background fill → #224466
+APPLIED — 2 committed                     ✓ Title · "Amended Title"
+                                          ✓ Logo position · 40, 40
 
-APPLIED (committed values)
-  op-1. title → "Amended Title"
-  op-3. logo → (40, 40)
-
-STATE: v0 → v2
-UNDO: available
+State v0 → v2
+▸ Developer details (receipt id, tool, intent, operation ids, timestamps) — collapsed
 ```
 
 ## The 5 tools
@@ -92,6 +89,24 @@ WebMCP needs a supporting browser: Chrome 149+ launched with
 
 - `?clean=1` — hides the human-facing hint text. Agent-side mutation still happens only through the `design_update` ChangeSet tool; the template gallery remains a human path, and it also goes through a ChangeSet.
 - `?debug=1` — exposes `window.__guard` in the console for interactive debugging. The e2e does **not** use it.
+
+## Deploy
+
+```bash
+npm run build        # tsc && vite build → dist/
+```
+
+Publish the **`dist/` folder** — Netlify Drop (drag & drop at app.netlify.com/drop) works as-is, because Vite copies `public/_headers` verbatim into `dist/_headers`. Those headers make the WebMCP browser setup explicit:
+
+- `Origin-Agent-Cluster: ?1` — WebMCP requires the document to live in an **origin-keyed agent cluster**.
+- `Permissions-Policy: tools=(self)` — the experimental `tools()` permission is exposed to this origin only.
+
+Repository-connected deploys are covered by [`netlify.toml`](./netlify.toml) (build `npm run build`, publish `dist`). Post-deploy verification in the browser console:
+
+```js
+await document.modelContext.getTools(); // → the 5 tools
+window.originAgentCluster;              // → true
+```
 
 ### E2E troubleshooting
 

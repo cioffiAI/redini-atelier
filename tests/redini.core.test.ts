@@ -5,7 +5,8 @@ import type { AgentOutcome, ModelContextLike, OperationRuntime } from '../src/re
 import { InMemoryUI } from '../src/redini/ui/in-memory';
 
 /**
- * Deterministic canvas-like fixture for the ChangeSet gates.
+ * Deterministic canvas-like fixture for the ChangeSet gates, undo/redo
+ * history lifecycle, failure paths and stale invalidation.
  * State: { texts: {title, subtitle}, fills: {background, text}, font, box: {x, y, size}, version }
  * Operation kinds: setText / setFill / setFont / move / resize / boom (fails on apply).
  */
@@ -136,9 +137,12 @@ function createCanvasFixture() {
 /**
  * Fixture for FAILURE-path semantics: a ChangeSet tool whose runtime can be
  * programmed to (a) fail during commit compensation (rollback failure) and
- * (b) fail during undo replay (undo token lifecycle).
+ * (b) fail during undo replay (undo/redo stack lifecycle). With
+ * `withStateVersion: false` the tool exposes NO app version — only Redini's
+ * internal counter can guard staleness.
  */
-function createFailureFixture() {
+function createFailureFixture(options?: { withStateVersion?: boolean }) {
+  const withStateVersion = options?.withStateVersion ?? true;
   const ui = new InMemoryUI();
   let idCounter = 0;
   const guard = createGuard({ ui, idFactory: () => `id-${++idCounter}` });
@@ -196,7 +200,7 @@ function createFailureFixture() {
       },
       simulate,
     },
-    getStateVersion: () => state.version,
+    getStateVersion: withStateVersion ? () => state.version : undefined,
   });
   const propose = (operations: Array<{ kind: string; params: Record<string, unknown> }>): string => {
     const p = guard.dispatch('flaky_design_update', { intent: 'x', operations }) as Promise<AgentOutcome>;
@@ -1032,5 +1036,133 @@ describe('Redini v3 — ChangeSet gates', () => {
     // Enforcement stays lazy: the stale commit is rejected exactly as before.
     await expect(f.guard.commitChangeSet(cs2)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
     expect(f.state.x).toBe(2); // the failed undo left op-3 compensated
+  });
+
+  it('38. FAILED commit sweeps pending ChangeSets: the UI copy of B is stale immediately (repro: two pending, commit A fails)', async () => {
+    const f = createCanvasFixture();
+    const pA = f.guard.dispatch('design_update', {
+      intent: 'A',
+      operations: [
+        { kind: 'setText', params: { field: 'title', value: 'Applied then rolled back' } },
+        { kind: 'boom', params: {} },
+      ],
+    }) as Promise<AgentOutcome>;
+    const csA = f.ui.lastChangeSetId();
+    const pB = f.guard.dispatch('design_update', {
+      intent: 'B',
+      operations: [{ kind: 'setFill', params: { target: 'background', value: '#222222' } }],
+    }) as Promise<AgentOutcome>;
+    const csB = f.ui.lastChangeSetId();
+
+    // B is fresh at proposal time — both views agree.
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(false);
+    expect(f.ui.changeSets.get(csB)?.changeset.isStale).toBe(false);
+
+    // Commit A fails MID-commit: op-1 applies (version 0→1), op-2 throws, the
+    // inverse restores op-1 (version →2). State values are restored but the
+    // version counters MOVED.
+    await expect(f.guard.commitChangeSet(csA)).rejects.toMatchObject({ code: 'EXECUTION_FAILED' });
+    expect(f.state.texts.title).toBe('Hello'); // compensation restored the value
+    expect(f.state.version).toBe(2); // but the runtime version advanced
+
+    // The failure branch re-emitted pending ChangeSets: the copy the UI already
+    // holds shows isStale TRUE at its latest update — no other event needed.
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(true);
+    expect(f.ui.changeSets.get(csB)?.changeset.isStale).toBe(true);
+
+    // Enforcement stays lazy and exact: committing B is rejected, nothing applies.
+    const callsBefore = f.applyCalls.count;
+    await expect(f.guard.commitChangeSet(csB)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(f.applyCalls.count).toBe(callsBefore);
+    expect(f.state.fills.background).toBe('#ffffff');
+    expect(await pA).toMatchObject({ status: 'execute_failed', changeSetId: csA, error: { code: 'EXECUTION_FAILED' } });
+    expect(await pB).toMatchObject({ status: 'stale_transaction', changeSetId: csB });
+  });
+
+  it('39. failed commit WITHOUT app version: mutationCounter sweep marks pending B stale via mutationIndex (ROLLBACK_FAILED)', async () => {
+    // Runtime with NO getStateVersion: only Redini's internal counter exists.
+    const f = createFailureFixture({ withStateVersion: false });
+    const pA = f.guard.dispatch('flaky_design_update', {
+      intent: 'fails',
+      operations: [
+        { kind: 'ok', params: { x: 5 } },
+        { kind: 'applyFails', params: {} },
+      ],
+    }) as Promise<AgentOutcome>;
+    const csA = f.ui.lastChangeSetId();
+    const pB = f.guard.dispatch('flaky_design_update', {
+      intent: 'pending B',
+      operations: [{ kind: 'ok', params: { x: 9 } }],
+    }) as Promise<AgentOutcome>;
+    const csB = f.ui.lastChangeSetId();
+    f.behaviors.failReverseOnRollback = true; // compensating op-1 throws too
+
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(false);
+    await expect(f.guard.commitChangeSet(csA)).rejects.toMatchObject({ code: 'ROLLBACK_FAILED' });
+    // Compensation failed, so the world IS genuinely changed (x stays 5) — and
+    // there is no app version to notice: the internal mutation counter must.
+    expect(f.state.x).toBe(5);
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(true);
+    expect(f.ui.changeSets.get(csB)?.changeset.isStale).toBe(true);
+
+    await expect(f.guard.commitChangeSet(csB)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(f.state.x).toBe(5); // nothing of B applied
+    expect(await pA).toMatchObject({ status: 'execute_failed', error: { code: 'ROLLBACK_FAILED' } });
+    expect(await pB).toMatchObject({ status: 'stale_transaction', changeSetId: csB });
+  });
+
+  it('40. getHistory returns an ISOLATED DTO: mutating a returned entry can never corrupt the stored history', async () => {
+    const f = createCanvasFixture();
+    const csId = f.propose('History DTO', [{ kind: 'setText', params: { field: 'title', value: 'TARGET' } }]);
+    const originalLabel = (await f.guard.commitChangeSet(csId)).applied[0].label;
+    expect(originalLabel).toContain('TARGET');
+
+    // Corrupt the DTO handed out by getHistory: params AND receipt label.
+    const history = f.guard.getHistory();
+    expect(history).toHaveLength(1);
+    history[0].forwardOperations[0].params.value = 'CORRUPTED';
+    history[0].receipt.applied[0].label = 'CORRUPTED LABEL';
+
+    // undo + redo must replay the STORED forward set, not the DTO mutation.
+    await f.guard.undo();
+    await f.guard.redo();
+    expect(f.state.texts.title).toBe('TARGET');
+
+    const fresh = f.guard.getHistory();
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].forwardOperations[0].params.value).toBe('TARGET');
+    // The stored receipt (history copy AND the receipt served to the UI) is intact.
+    expect(fresh[0].receipt.applied[0].label).toBe(originalLabel);
+    expect(f.ui.receipts.at(-1)?.applied[0].label).toBe(originalLabel);
+  });
+
+  it('41. actor provenance: dispatch opts carry actor into the ChangeSet and its audit entries; default is agent', async () => {
+    const f = createCanvasFixture();
+    const pAgent = f.guard.dispatch('design_update', {
+      intent: 'Agent side',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'AGENT' } }],
+    }) as Promise<AgentOutcome>;
+    pAgent.catch(() => {});
+    const csAgent = f.ui.lastChangeSetId();
+    const pHuman = f.guard.dispatch(
+      'design_update',
+      { intent: 'Human side', operations: [{ kind: 'setFill', params: { target: 'background', value: '#123456' } }] },
+      undefined,
+      { actor: 'human' },
+    ) as Promise<AgentOutcome>;
+    pHuman.catch(() => {});
+    const csHuman = f.ui.lastChangeSetId();
+
+    expect(f.guard.getChangeSet(csAgent)?.actor).toBe('agent');
+    expect(f.guard.getChangeSet(csHuman)?.actor).toBe('human');
+    expect(f.ui.changeSets.get(csHuman)?.changeset.actor).toBe('human');
+    // The audit entries inherit the actor of their staged ChangeSet.
+    expect(f.ui.audit.find((a) => a.kind === 'proposed' && a.txId === csAgent)?.actor).toBe('agent');
+    expect(f.ui.audit.find((a) => a.kind === 'proposed' && a.txId === csHuman)?.actor).toBe('human');
+    // …and later entries for the same ChangeSet keep it (commit keeps provenance).
+    await f.guard.commitChangeSet(csHuman);
+    expect(f.ui.audit.find((a) => a.kind === 'committed' && a.txId === csHuman)?.actor).toBe('human');
+    expect(await pHuman).toMatchObject({ status: 'committed', changeSetId: csHuman });
+    void pAgent;
   });
 });

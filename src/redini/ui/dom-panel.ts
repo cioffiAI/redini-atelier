@@ -170,6 +170,13 @@ export function createDomPanel(
     switch (entry.kind) {
       case 'proposed': {
         const n = ops?.length ?? null;
+        // Human-originated proposals (e.g. template clicks) are staged by the
+        // person, not the agent — the intent comes from the panel's own card
+        // data, the same lookup the agent line uses for N.
+        if (entry.actor === 'human') {
+          const intent = states.get(entry.txId)?.cs.intent ?? null;
+          return intent ? `You staged ${intent}` : 'You staged a proposal';
+        }
         return n === null ? 'Agent proposed a new proposal' : `Agent proposed ${n} change${n === 1 ? '' : 's'}`;
       }
       case 'reviewing': {
@@ -700,6 +707,10 @@ export function createDomPanel(
       commit.type = 'button';
       commit.className = 'tx-commit';
       commit.textContent = `Commit ${includedCount} change${includedCount === 1 ? '' : 's'}`;
+      // "Commit 0 changes" must never be reachable: the empty subset is a
+      // human-UI error (guard keeps EMPTY_CHANGESET for the programmatic path).
+      // Re-evaluated on every toggle/amend re-render of the card.
+      commit.disabled = includedCount === 0;
       commit.addEventListener('click', () => {
         if (!guard) return;
         // FIX D: errors (e.g. EMPTY_CHANGESET) render inline; never to console.

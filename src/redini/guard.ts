@@ -43,6 +43,7 @@ interface InternalChangeSet {
   id: string;
   tool: string;
   intent: string;
+  actor: 'agent' | 'human';
   ops: InternalOp[];
   stateVersion: number;
   mutationIndex: number;
@@ -207,6 +208,7 @@ export class RediniGuard {
     toolName: string,
     input: Record<string, unknown>,
     signal: AbortSignal = new AbortController().signal,
+    opts?: { actor?: 'agent' | 'human' },
   ): Promise<unknown> {
     const reg = this.registrations.get(toolName);
     if (!reg) throw new RediniError('UNKNOWN_TOOL', `no tool registered as "${toolName}"`);
@@ -260,6 +262,7 @@ export class RediniGuard {
       id: this.nextId(),
       tool: def.name,
       intent,
+      actor: opts?.actor ?? 'agent',
       ops,
       stateVersion: def.getStateVersion?.() ?? 0,
       mutationIndex: this.mutationCounter,
@@ -431,6 +434,14 @@ export class RediniGuard {
       const message = e instanceof Error ? e.message : String(e);
       cs.status = 'failed';
       this.emitUpdate(cs);
+      // A failed commit still touched the runtime — version counters moved even
+      // when compensation restored values (monotonic-version philosophy). The
+      // internal bump keeps the guard working for runtimes WITHOUT
+      // getStateVersion, where a compensation failure leaves the world genuinely
+      // changed with no app-version signal. appliedIds empty = the first op
+      // failed before any mutation → nothing changed, no bump.
+      if (appliedIds.length > 0) this.mutationCounter += 1;
+      this.sweepPendingPreviews();
       if (rollbackFailure) {
         this.audit('failed', cs, {
           error: message,
@@ -739,12 +750,18 @@ export class RediniGuard {
 
   /**
    * Read-only view of the whole editor history: undone entries first (oldest
-   * commit at index 0), redo entries after them. Entries expose the stored
-   * (amended) forward operations, the reverse-order inverses and a CLONED
-   * receipt — safe for audit/debug surfaces.
+   * commit at index 0), redo entries after them. Every entry is a
+   * structuredClone DTO — forwardOperations, inverseOperations and the receipt
+   * are isolated from the stored history, so consumers can never corrupt the
+   * stacks. Safe for audit/debug surfaces.
+   */
+  /**
+   * Read-only DTO view of the history (undo + redo). Each entry is deep-cloned
+   * so consumers cannot corrupt replay data. Requires plain-data operations
+   * (no functions/class instances inside params — structuredClone semantics).
    */
   getHistory(): readonly HistoryEntry[] {
-    return [...this.undoStack, ...this.redoStack];
+    return [...this.undoStack, ...this.redoStack].map((entry) => structuredClone(entry));
   }
 
   /** Editor-style availability: a non-empty redo stack. */
@@ -806,6 +823,7 @@ export class RediniGuard {
       id: cs.id,
       tool: cs.tool,
       intent: cs.intent,
+      actor: cs.actor,
       operations,
       stateVersion: cs.stateVersion,
       status: cs.status,
@@ -875,6 +893,7 @@ export class RediniGuard {
       tool: cs?.tool ?? 'unknown',
       at: this.now(),
       detail,
+      actor: cs?.actor ?? 'agent',
     });
   }
 }

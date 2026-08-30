@@ -264,7 +264,7 @@ describe('Atelier — design_update ChangeSet over Redini', () => {
 
   it('humanApply flow: a template is a 3-op ChangeSet committed instantly', async () => {
     const f = setup();
-    const csId = f.propose('Apply template "Evening Gala"', [
+    const csId = f.propose('Template "Evening Gala"', [
       { kind: 'setFill', params: { target: 'background', value: '#141420' } },
       { kind: 'setFill', params: { target: 'text', value: '#e8c46a' } },
       { kind: 'setFont', params: { value: 'Georgia, serif' } },

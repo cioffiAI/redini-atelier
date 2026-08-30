@@ -46,7 +46,7 @@ agent intent → proposed mutation → visual preview/diff → human edit → co
 La combinazione — **live visual collaboration + staged transactions + editable proposal + rollback + audit trail** — è ciò che i confirmation gate esistenti NON hanno:
 - **Editable proposal**: l'umano modifica i parametri della proposta prima del commit (il gate esistente dice solo sì/no).
 - **Visual preview/diff**: il cambiamento proposto si vede sul prodotto reale prima di accaderlo (nel nostro caso: la locandina prima/dopo), non è un modal astratto.
-- **Receipts**: ogni commit produce una ricevuta strutturata (id, cambiamenti, timestamp, undo token) — tracciabilità a livello di transazione, non di log.
+- **Receipts**: ogni commit produce una ricevuta strutturata (id, cambiamenti, timestamp, stato v→v) — tracciabilità a livello di transazione, non di log.
 - **Rollback nativo**: l'undo deterministico (via inverse operations, niente snapshot) è parte della transazione, non un'afterthought.
 - **Provenance**: audit trail completo di chi ha proposto cosa, cosa l'umano ha cambiato nella proposta, esito.
 
@@ -64,7 +64,7 @@ Redini **gira nella pagina**: un'app malevola o compromessa può aggirare un con
 | Leggere è gratis, mutare è una transazione | Tool read-only (`readOnlyHint`) girano subito; le mutazioni entrano in staging |
 | L'umano modifica la proposta, non solo la approva | Ogni transazione in staging è editabile nei parametri prima del commit |
 | Vedi prima che accada | Preview del diff sul prodotto reale (prima/dopo) dentro la card di staging |
-| Tutto ciò che si commetta ha una ricevuta | Receipt strutturata: id, cambiamenti, timestamp, undo token |
+| Tutto ciò che si commetta ha una ricevuta | Receipt strutturata: id, cambiamenti, timestamp, stato v→v |
 | Tutto ciò che si commetta è reversibile | Rollback con un click; la ricevuta lo riferisce nell'audit trail |
 | L'agente non perde il filo | Ogni proposta riceve risposta strutturata (committed / modified / declined) — la collaborazione continua |
 
@@ -74,7 +74,7 @@ Redini **gira nella pagina**: un'app malevola o compromessa può aggirare un con
    - `registerChangeSetTool()` (con `registerSafeTool()` per i read-only)
    - ChangeSet multi-operazione: staging, per-op amend validato, cherry-pick, commit atomico del subset
    - Receipt a righe strutturate: `intended / amended / skippedByHuman / applied` (con i valori realmente committati)
-   - Undo deterministico via **inverse operations** (niente snapshot store); undo token monouso con lifecycle sicuro
+   - Undo/redo deterministici via **inverse operations** (niente snapshot store): history editor-style con `undoStack`/`redoStack` — `undo()`/`redo()` senza token, ogni nuovo commit invalida il redo
    - Audit trail di provenienza (chi ha proposto cosa, cosa l'umano ha cambiato, esito)
 2. **Atelier** — studio di design agent-native dove il flusso è:
    un intent → 3 operazioni proposte → l'umano ne commetta una, ne modifica una (amend via form tipizzati), ne esclude una → ghost preview sul canvas prima del commit → receipt 4 sezioni → undo deterministico

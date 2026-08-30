@@ -20,11 +20,11 @@ Judging: 4-21 settembre · Vincitori: ~23 settembre
 - [x] `registerChangeSetTool()` / `registerSafeTool()` — una intent → un tool call → un ChangeSet
 - [x] ChangeSet first-class: `ChangeSet {operations[], stateVersion, status, proposedAt, committedAt}` con lifecycle `proposed → reviewing → committed | declined | cancelled | stale | failed (+ undone | undo_failed)`
 - [x] Operazioni indirizzabili singolarmente: amend valdato (per-op, `INVALID_AMENDMENT` senza mutazione), toggle/cherry-pick, commit atomico del subset
-- [x] **Undo deterministico via inverse operations** (vocabolario limitato, inverso esatto per op; NIENTE snapshot store); undo token monouso consumato solo a replay completo
+- [x] **Undo/redo deterministici via inverse operations** (vocabolario limitato, inverso esatto per op; NIENTE snapshot store); history editor-style `undoStack`/`redoStack`: l'entry si sposta sul redo stack SOLO a replay completo, ogni nuovo commit invalida il redo
 - [x] Receipt a righe strutturate: intended / amended / skippedByHuman / applied (valori realmente committati)
 - [x] Stale guard: contatore mutazioni interno + `getStateVersion` opzionale → `STALE_TRANSACTION`
 - [x] Provenance / audit trail (kind, txId, humanEdited, rolledBack TRUTHFUL)
-- [x] 14/14 test gate passati (`npm test`, vitest) — inclusi: decline senza execute, rollback atomico senza false receipt, rollback fallito → `ROLLBACK_FAILED`, undo esatto, double-undo deterministico, undo fallito che NON consuma il token, due transazioni concorrenti, AbortSignal → `cancelled` con notify UI, promessa WebMCP chiusa solo dopo decisione
+- [x] 14/14 test gate passati (`npm test`, vitest) — inclusi: decline senza execute, rollback atomico senza false receipt, rollback fallito → `ROLLBACK_FAILED`, undo esatto, double-undo deterministico, undo fallito che NON sposta l'entry (resta sull'undo stack, retry-safe), due transazioni concorrenti, AbortSignal → `cancelled` con notify UI, promessa WebMCP chiusa solo dopo decisione
 - [x] API che emette sempre outcome strutturato diretto all'agente (committed/declined_by_user/cancelled/stale_transaction/execute_failed) — l'execute del changeset NON rifiuta mai
 
 **Fatto**: le vie (commit / amend+commit / skip / rifiuto / rollback / undo / abort) producono receipt coerenti nell'audit trail — verificato in unit test.
@@ -42,9 +42,11 @@ Judging: 4-21 settembre · Vincitori: ~23 settembre
 **Fatto quando**: flusso completo dimostrabile: intent → ChangeSet → negoziazione → commit del subset → receipt → undo.
 
 ### Giorno 4 — 01/09: solidità + repo — COMPLETATO (release-hardening v3)
-- [x] Redini v3 hardening: amendment validato + label ricalcolata, abort `cancelled` visibile, undo token lifecycle, rollback reporting truthful, direct execution result (no envelope), schema strict, rimozione varianti (superficie fissa a 5)
+- [x] Redini v3 hardening: amendment validato + label ricalcolata, abort `cancelled` visibile, history undo/redo lifecycle (undoStack/redoStack), rollback reporting truthful, direct execution result (no envelope), schema strict, rimozione varianti (superficie fissa a 5)
 - [x] README.md (Atelier primary / Redini secondary, flusso, "How this differs" onesto, atomicity claim scoped, come far girare, ?clean=1 / ?debug=1)
 - [x] Pulizia codice: safe DOM (no innerHTML dinamico), CSS senza blocchi morti, docs v3, `npm run build` senza errori
+- [x] Pass history/UI (commit 45ee190): undo/redo editor-style completo nel pannello (bottoni + tastiera ⌘Z / ⇧⌘Z / Ctrl+Y, mai sugli input di testo), redo invalidato da ogni nuovo commit
+- [x] Micro-hardening finale (post-45ee190): commit fallito → sweep dei pending (isStale immediato anche senza getStateVersion), `getHistory()` come DTO isolato (structuredClone), actor provenance (proposte umane mai "Agent proposed"), template come `<button>` semantici, Commit disabilitato a 0 operazioni, docs undo/redo sincronizzate
 - [ ] Repo pubblico: licenza visibile nell'About, description curata
 
 **Fatto quando**: un estraneo clona il repo, segue il README e fa girare tutto.

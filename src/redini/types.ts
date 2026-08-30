@@ -78,6 +78,8 @@ export interface ChangeSet {
   tool: string;
   /** The agent's stated intent, one sentence. */
   intent: string;
+  /** Who staged the proposal: the agent (default) or a direct human action. */
+  actor: 'agent' | 'human';
   operations: ChangeSetOperation[];
   stateVersion: number;
   status: ChangeSetStatus;
@@ -174,6 +176,8 @@ export interface AuditEntry {
   tool: string;
   at: number;
   detail?: Record<string, unknown>;
+  /** Provenance of the staged ChangeSet: human actions render as "You …", agent as "Agent …". */
+  actor?: 'agent' | 'human';
 }
 
 export interface PreviewInfo {

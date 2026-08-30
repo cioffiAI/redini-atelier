@@ -55,12 +55,15 @@ export function initAtelierUI(
     tplListEl.innerHTML = '';
     for (const t of templates) {
       const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
       const strong = document.createElement('strong');
       strong.textContent = t.name;
       const span = document.createElement('span');
       span.textContent = t.styleTags.join(' · ');
-      li.append(strong, span);
-      li.addEventListener('click', () => onPickTemplate(t.id));
+      btn.append(strong, span);
+      btn.addEventListener('click', () => onPickTemplate(t.id));
+      li.appendChild(btn);
       tplListEl.appendChild(li);
     }
   }

@@ -359,15 +359,39 @@ assert(finalTitle === 'Amended Title', `decline must not mutate anything, got "$
 const declinedChip = await page.$eval('.tx-card:last-child .tx-chip', (el) => el.textContent);
 assert(declinedChip === 'Declined', `declined card chip should read "Declined", got "${declinedChip}"`);
 
-// ---------- (13) template gallery: the human path also flows through a ChangeSet ----------
+// ---------- (13) template gallery: real buttons, and the human path also flows through a ChangeSet ----------
+// The gallery renders SEMANTIC <button> items (keyboard-focusable, not clickable <li>).
+const tplButtons = await page.$$eval('#template-list button', (btns) =>
+  btns.map((b) => ({
+    tag: b.tagName,
+    name: b.querySelector('strong')?.textContent ?? '',
+  })),
+);
+console.log(`template buttons: ${tplButtons.map((b) => b.name).join(', ')}`);
+assert(tplButtons.length === 4, `template gallery must render 4 buttons, got ${tplButtons.length}`);
+assert(tplButtons.every((b) => b.tag === 'BUTTON'), 'template gallery items must be real <button> elements');
+assert(tplButtons.some((b) => b.name === 'Evening Gala'), 'template gallery must offer Evening Gala');
+const tplFocusable = await page.evaluate(() => {
+  const b = document.querySelector('#template-list button');
+  if (!b) return false;
+  b.focus();
+  return document.activeElement === b;
+});
+assert(tplFocusable, 'template buttons must be keyboard-focusable');
+
+// Actor provenance: the click is a HUMAN action — it must NOT add an "Agent
+// proposed" line; it must surface as "You staged Template …".
+const agentProposedBeforeTpl = await page.$eval('#activity-log', (el) =>
+  (el.textContent.match(/Agent proposed/g) ?? []).length,
+);
 const galaClicked = await page.evaluate(() => {
-  const lis = [...document.querySelectorAll('#template-list li')];
-  const target = lis.find((li) => li.querySelector('strong')?.textContent === 'Evening Gala');
+  const btns = [...document.querySelectorAll('#template-list button')];
+  const target = btns.find((b) => b.querySelector('strong')?.textContent === 'Evening Gala');
   if (!target) return false;
   target.click();
   return true;
 });
-assert(galaClicked, 'template gallery must offer Evening Gala');
+assert(galaClicked, 'the Evening Gala template button must be clickable');
 await sleep(500);
 const tplBg = await page.$eval('#flyer', (el) => el.style.background);
 const tplTitle = await page.$eval('#flyer h2', (el) => el.textContent);
@@ -376,6 +400,18 @@ console.log(`after template click: bg=${tplBg}, title="${tplTitle}", last chip=$
 assert(tplBg === 'rgb(20, 20, 32)', `template click must apply the chosen design through the human path, bg=${tplBg}`);
 assert(tplTitle === 'Amended Title', 'template click must keep the title (templates only set fills/font)');
 assert(tplChip === 'Committed', `the template ChangeSet must commit instantly, chip="${tplChip}"`);
+const agentProposedAfterTpl = await page.$eval('#activity-log', (el) =>
+  (el.textContent.match(/Agent proposed/g) ?? []).length,
+);
+assert(
+  agentProposedAfterTpl === agentProposedBeforeTpl,
+  `the human template click must NOT add an "Agent proposed" line (${agentProposedBeforeTpl} → ${agentProposedAfterTpl})`,
+);
+const activityHeadTpl = await page.$eval('#activity-log', (el) => el.textContent.slice(0, 300));
+assert(
+  activityHeadTpl.includes('You staged Template'),
+  `the activity must record the human staging as "You staged Template …", got "${activityHeadTpl}"`,
+);
 
 // ---------- (14) KEYBOARD history: ⌘Z undo / ⇧⌘Z redo / Ctrl+Y (exhausted) ----------
 await focusBody();
@@ -574,6 +610,27 @@ const firstPendingCard = await page.evaluate(() => {
 assert(firstPendingCard !== null, 'the FIRST proposal card must still be present when a second one owns the ghost');
 assert(firstPendingCard.chip === 'Proposed', `the first card must still be pending, chip="${firstPendingCard.chip}"`);
 assert(firstPendingCard.value.includes('PENDING ONE'), `the first card's proposed value must remain visible, value="${firstPendingCard.value}"`);
+
+// ---------- (16.5) "Commit 0 changes" must be UNREACHABLE: real disabled attribute, recomputed per toggle ----------
+const commitCard = (await page.$$('.tx-card')).at(-1); // 'Second of two pending', single setFill op
+const commitCheckbox = await commitCard.$('.tx-op input[type="checkbox"]');
+assert(commitCheckbox, 'the second pending card must have a toggleable operation');
+await commitCheckbox.click(); // uncheck the ONLY operation → empty subset
+await sleep(300);
+const commitDisabled0 = await page.$eval('.tx-card:last-child .tx-commit', (el) => el.disabled);
+const commitLabel0 = await page.$eval('.tx-card:last-child .tx-commit', (el) => el.textContent);
+console.log(`all ops unchecked: commit disabled=${commitDisabled0}, label="${commitLabel0}"`);
+assert(commitLabel0 === 'Commit 0 changes', `commit label must count the empty subset, got "${commitLabel0}"`);
+assert(commitDisabled0 === true, 'the Commit button must be DISABLED (real disabled attribute) at 0 included operations');
+// Re-include one operation → the button enables again on the re-render.
+const commitCheckboxAgain = await commitCard.$('.tx-op input[type="checkbox"]');
+await commitCheckboxAgain.click();
+await sleep(300);
+const commitDisabled1 = await page.$eval('.tx-card:last-child .tx-commit', (el) => el.disabled);
+const commitLabel1 = await page.$eval('.tx-card:last-child .tx-commit', (el) => el.textContent);
+console.log(`re-checked: commit disabled=${commitDisabled1}, label="${commitLabel1}"`);
+assert(commitDisabled1 === false, 'the Commit button must re-enable when an operation is re-included');
+assert(commitLabel1 === 'Commit 1 change', `commit label must recount the subset, got "${commitLabel1}"`);
 
 // Cleanup: decline both pending proposals (settles the agent promises, no mutation).
 await page.click('.tx-card:last-child .tx-decline');

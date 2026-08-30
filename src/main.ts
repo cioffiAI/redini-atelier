@@ -263,18 +263,24 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
 atelierUi = initAtelierUI(store, (templateId) => {
   // Human direct action: even this flows through a ChangeSet (dispatch +
   // immediate commit), so the audit trail records everything and pending agent
-  // ChangeSets correctly go stale.
+  // ChangeSets correctly go stale. The actor flag keeps provenance honest:
+  // a human click is staged by the human, never "Agent proposed".
   const t = templates.find((x) => x.id === templateId);
   if (!t) return;
-  const intent = `Apply template "${t.name}"`;
-  const p = guard.dispatch('design_update', {
-    intent,
-    operations: [
-      { kind: 'setFill', params: { target: 'background', value: t.design.background } },
-      { kind: 'setFill', params: { target: 'text', value: t.design.color } },
-      { kind: 'setFont', params: { value: t.design.fontFamily } },
-    ],
-  }) as Promise<unknown>;
+  const intent = `Template "${t.name}"`;
+  const p = guard.dispatch(
+    'design_update',
+    {
+      intent,
+      operations: [
+        { kind: 'setFill', params: { target: 'background', value: t.design.background } },
+        { kind: 'setFill', params: { target: 'text', value: t.design.color } },
+        { kind: 'setFont', params: { value: t.design.fontFamily } },
+      ],
+    },
+    undefined,
+    { actor: 'human' },
+  ) as Promise<unknown>;
   // MAJOR 3: if dispatch rejects (validation), there is NO ChangeSet to commit —
   // never guess with `.at(-1)`. Locate the staged ChangeSet deterministically:
   // the most recent one with THIS intent that is still pending.

@@ -269,20 +269,26 @@ main {
   gap: 0.45rem;
   flex-wrap: wrap;
 }
-.templates li {
+/* Template gallery items are REAL buttons: keyboard-focusable, same visual
+   design as the previous clickable <li> (focus-visible styling is global). */
+.templates button {
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   padding: 0.3rem 0.6rem;
   font-size: 0.74rem;
+  color: var(--text);
+  background: var(--surface);
   cursor: pointer;
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 0.05rem;
+  text-align: left;
   transition: border-color 120ms ease, background 120ms ease;
 }
-.templates li:hover { border-color: var(--accent); background: var(--accent-soft); }
-.templates li strong { font-weight: 600; }
-.templates li span { font-size: 0.62rem; color: var(--text-faint); }
+.templates button:hover { border-color: var(--accent); background: var(--accent-soft); }
+.templates button strong { font-weight: 600; }
+.templates button span { font-size: 0.62rem; color: var(--text-faint); }
 
 /* ---------------------------------------------------------------------------
    Headings / hints
