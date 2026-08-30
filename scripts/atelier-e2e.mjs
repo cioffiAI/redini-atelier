@@ -638,6 +638,19 @@ await sleep(300);
 rawResult = await page.evaluate(() => window.__e2ePendingB);
 const declinedB = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
 assert(declinedB.status === 'declined_by_user', `the second proposal must decline cleanly, got ${declinedB.status}`);
+// ---------- (16.6) PROMOTION: the declined B owned the ghost slot — the FIRST
+// proposal's cached preview must be restored (multi-pending single-slot fallback) ----------
+const promotedGhostTitle = await page.$eval('#flyer-ghost h2', (el) => el.textContent);
+const promotedGhostBg = await page.$eval('#flyer-ghost', (el) => el.style.background);
+const badgeAfterPromotion = await page.$eval('#ghost-badge', (el) => el.textContent);
+const previewingAfterPromotion = await page.$eval('#flyer-wrap', (el) => el.classList.contains('previewing'));
+console.log(`after declining B: promoted ghost="${promotedGhostTitle}", bg=${promotedGhostBg}, badge="${badgeAfterPromotion}", previewing=${previewingAfterPromotion}`);
+assert(promotedGhostTitle === 'PENDING ONE', `the FIRST proposal's preview must return after the second was declined, got "${promotedGhostTitle}"`);
+assert(promotedGhostBg === 'rgb(255, 253, 248)', `the restored ghost must carry the FIRST proposal's design, bg="${promotedGhostBg}"`);
+assert(badgeAfterPromotion.includes('First of two pending'), `the badge must name the restored owner, got "${badgeAfterPromotion}"`);
+assert(!badgeAfterPromotion.includes('Second of two pending'), `the badge must not name the declined proposal anymore, got "${badgeAfterPromotion}"`);
+assert(badgeAfterPromotion.startsWith('PREVIEW'), 'the promoted badge must stay in preview voice');
+assert(previewingAfterPromotion === true, 'the restored preview must keep the previewing state');
 // The first proposal's card is no longer last (the declined second card is):
 // address it by its intent like the assertions above.
 await page.evaluate(() => {
@@ -653,6 +666,8 @@ const declinedA = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawRes
 assert(declinedA.status === 'declined_by_user', `the first proposal must decline cleanly, got ${declinedA.status}`);
 const pendingGhostGone = await page.$eval('#flyer-ghost', (el) => el.classList.contains('hidden'));
 assert(pendingGhostGone, 'the ghost must be gone after both pending proposals reached a terminal status');
+const previewingAfterBothDeclined = await page.$eval('#flyer-wrap', (el) => el.classList.contains('previewing'));
+assert(!previewingAfterBothDeclined, 'no previewing class after both proposals were declined');
 
 // ---------- (17) zero unexpected console/page errors ----------
 console.log(`console errors: ${consoleErrors.length}, page errors: ${pageErrors.length}`);

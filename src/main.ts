@@ -71,9 +71,31 @@ const store = new AtelierStore();
 let atelierUi: { setGhost: (g: FlyerDesign | null) => void } | null = null;
 /** Which ChangeSet painted the ghost — only IT may clear it (FIX D). */
 let ghostOwner: string | null = null;
+/**
+ * Cache of the last rendered ghost per FRESH pending ChangeSet. The ghost is
+ * a SINGLE slot: when the current owner reaches a terminal status without
+ * mutating the world (decline/cancel), the newest fresh proposal's cached
+ * preview is promoted back into the slot instead of vanishing.
+ */
+const previewCache = new Map<string, FlyerDesign | null>();
 
 function setGhost(ghost: FlyerDesign | null): void {
   atelierUi?.setGhost(ghost);
+}
+
+/**
+ * Paint the single-slot ghost and the preview-wide status lines for `cs`.
+ * MAJOR 1: the badge always names the ChangeSet that OWNS the current preview;
+ * MAJOR 2: the canvas status reflects the preview state, driven by the same
+ * real event (intent named when short).
+ */
+function paintGhost(cs: { intent: string }, ghost: FlyerDesign | null): void {
+  setGhost(ghost);
+  if (ghost === null) return;
+  setGhostBadge(cs.intent);
+  setCanvasStatus(
+    cs.intent.length <= 40 ? `Preview — not applied yet · ${cs.intent}` : 'Preview — not applied yet',
+  );
 }
 
 /**
@@ -169,32 +191,63 @@ const ui: UIAdapter & { bind?: (g: ReturnType<typeof createGuard>) => void } = {
   onChangesetUpdated(cs, preview) {
     panel.onChangesetUpdated(cs, preview);
     const ghost = (preview?.diff as { appliedPreview?: FlyerDesign } | undefined)?.appliedPreview ?? null;
+    let promoted = false;
     if (cs.status === 'proposed' || cs.status === 'reviewing') {
-      ghostOwner = cs.id;
-      // A stale proposal's preview is misleading: the canvas moved since it
-      // was staged — hide the ghost until the human re-proposes.
-      const painted = !cs.isStale && ghost !== null;
-      setGhost(painted ? ghost : null);
-      if (painted) {
-        // MAJOR 1: with >1 pending ChangeSet the ghost is a single slot — the
-        // badge always names the CURRENT owner (last-emitter-wins).
-        setGhostBadge(cs.intent);
-        // MAJOR 2: the canvas status reflects the preview state, driven by the
-        // same real event; intent named when short.
-        setCanvasStatus(cs.intent.length <= 40 ? `Preview — not applied yet · ${cs.intent}` : 'Preview — not applied yet');
+      if (!cs.isStale) {
+        // Fresh proposal: it owns the single slot (last-emitter-wins) and its
+        // rendered ghost is cached so a later promotion can restore it.
+        previewCache.set(cs.id, ghost);
+        ghostOwner = cs.id;
+        paintGhost(cs, ghost);
+      } else {
+        // A stale proposal's preview is misleading: the canvas moved since it
+        // was staged — drop it from the cache and clear the slot if it owned it.
+        previewCache.delete(cs.id);
+        if (ghostOwner === cs.id) {
+          ghostOwner = null;
+          setGhost(null);
+          setCanvasStatus('Proposal expired — the canvas moved while this proposal was open.');
+        }
       }
-    } else if (ghostOwner === cs.id) {
-      // The ChangeSet that painted the ghost reached a terminal status → clear it.
-      ghostOwner = null;
-      setGhost(null);
+    } else {
+      previewCache.delete(cs.id);
+      if (ghostOwner === cs.id) {
+        // The ChangeSet that painted the ghost reached a terminal status →
+        // clear the slot, then PROMOTE: the newest fresh pending proposal with
+        // a cached preview takes over. Decline/cancel leave the world
+        // untouched, so the previous owner's preview is still valid and
+        // returns; commit/undo/redo stale EVERY pending proposal (nothing
+        // qualifies) and the sweep's stale updates below keep the slot cleared.
+        ghostOwner = null;
+        setGhost(null);
+        // `guard` is declared later in this module (TDZ-safe: no UI event can
+        // fire during the createGuard construction below, so this handler only
+        // ever runs after `guard` is assigned).
+        const successor = [...guard.getChangeSets()]
+          .reverse()
+          .find(
+            (c) =>
+              (c.status === 'proposed' || c.status === 'reviewing') &&
+              !c.isStale &&
+              previewCache.get(c.id) != null,
+          );
+        if (successor) {
+          ghostOwner = successor.id;
+          paintGhost(successor, previewCache.get(successor.id) ?? null);
+          promoted = true;
+        }
+      }
     }
     // The CANVAS area communicates the last decision too (a small status line
-    // under the poster, driven by the real status — never decorative text).
-    if (cs.status === 'declined') setCanvasStatus('Declined — nothing was applied.');
-    else if (cs.status === 'cancelled') setCanvasStatus('Cancelled — nothing was applied.');
-    else if (cs.status === 'stale') setCanvasStatus('Proposal expired — nothing was applied.');
-    else if (cs.status === 'failed') setCanvasStatus("A change couldn't be applied — nothing was committed.");
-    else if (cs.status === 'undo_failed') setCanvasStatus('Undo failed partway — you can try again.');
+    // under the poster, driven by the real status — never decorative text). A
+    // promotion restored another live preview — its preview line already won.
+    if (!promoted) {
+      if (cs.status === 'declined') setCanvasStatus('Declined — nothing was applied.');
+      else if (cs.status === 'cancelled') setCanvasStatus('Cancelled — nothing was applied.');
+      else if (cs.status === 'stale') setCanvasStatus('Proposal expired — nothing was applied.');
+      else if (cs.status === 'failed') setCanvasStatus("A change couldn't be applied — nothing was committed.");
+      else if (cs.status === 'undo_failed') setCanvasStatus('Undo failed partway — you can try again.');
+    }
   },
   onReceipt(receipt: ChangeSetReceipt): void {
     panel.onReceipt(receipt);

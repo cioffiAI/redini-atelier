@@ -149,6 +149,7 @@ Se un `apply` fallisce:
 2. Se TUTTI gli inversi riescono: stato `failed`, audit `failed {error, rolledBack: <successi reali>}`, promessa agente → `execute_failed` con `error.code: EXECUTION_FAILED`, lanciato al chiamante UI `RediniError('EXECUTION_FAILED', msg, cause)`.
 3. Se UN inverso fallisce: ferma, stato `failed`, audit `failed {error, rolledBack: <successi finora>, rollbackFailed: true, failedCompensation: <id>}`, promessa agente → `execute_failed` con `error.code: ROLLBACK_FAILED`, lanciato `RediniError('ROLLBACK_FAILED', ..., {appliedOperations, compensatedOperations, failedCompensation, cause})`. **Nessun falso conteggio rolledBack.**
 4. La promessa dell'agente viene sbloccata ESATTAMENTE UNA volta in tutti i percorsi.
+5. MELD: Redini **non assume apply failure-atomic** — ogni `runtime.apply` tentato in un commit/undo/redo fallito invalida conservativamente le proposte pending (bump del `mutationCounter`), a prescindere dal fatto che un inverso sia stato restituito (un apply può mutare lo stato e lanciare SENZA restituire l'inverso).
 
 **Caso speciale EMPTY_CHANGESET**: committare un ChangeSet tutto-skippato è un errore
 della UI umana, NON dell'agente: la promessa NON viene sbloccata, il ChangeSet resta

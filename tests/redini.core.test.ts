@@ -172,10 +172,18 @@ function createFailureFixture(options?: { withStateVersion?: boolean }) {
   guard.registerChangeSetTool({
     name: 'flaky_design_update',
     description: 'Failure-path test tool.',
-    kinds: ['ok', 'applyFails'],
+    kinds: ['ok', 'applyFails', 'mutateAndThrows'],
     runtime: {
       apply(op) {
         if (op.kind === 'applyFails') throw new Error('apply boom');
+        if (op.kind === 'mutateAndThrows') {
+          // MELD: mutates the world, THEN throws, returning NO inverse. The
+          // commit failure must conservatively invalidate pending proposals —
+          // compensation has nothing to replay, yet the state really changed.
+          state.x = Number(op.params.x);
+          state.version += 1;
+          throw new Error('mutated then threw');
+        }
         // 'ok': the forward op sets x; its inverse carries {x: prev, undo: true}.
         const isInverse = op.params.undo === true;
         if (isInverse && behaviors.failReverseOnRollback) throw new Error('compensation boom');
@@ -1164,5 +1172,94 @@ describe('Redini v3 — ChangeSet gates', () => {
     expect(f.ui.audit.find((a) => a.kind === 'committed' && a.txId === csHuman)?.actor).toBe('human');
     expect(await pHuman).toMatchObject({ status: 'committed', changeSetId: csHuman });
     void pAgent;
+  });
+
+  it('42. failed commit WITHOUT inverse (apply mutates then throws, no getStateVersion): conservative bump invalidates pending B', async () => {
+    const f = createFailureFixture({ withStateVersion: false });
+    const csA = f.propose([{ kind: 'mutateAndThrows', params: { x: 5 } }]);
+    const pB = f.guard.dispatch('flaky_design_update', {
+      intent: 'pending B',
+      operations: [{ kind: 'ok', params: { x: 9 } }],
+    }) as Promise<AgentOutcome>;
+    pB.catch(() => {});
+    const csB = f.ui.lastChangeSetId();
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(false);
+
+    // The apply mutated state.x to 5 and threw BEFORE returning an inverse:
+    // the rollback has nothing to compensate, the world is honestly changed.
+    const err = await f.guard.commitChangeSet(csA).catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'RediniError', code: 'EXECUTION_FAILED' });
+    expect(f.state.x).toBe(5);
+    expect(f.guard.getChangeSet(csA)?.status).toBe('failed');
+
+    // Any ATTEMPTED apply conservatively bumps the internal counter (no app
+    // version exists to notice the mutation): B is stale in BOTH views.
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(true);
+    expect(f.ui.changeSets.get(csB)?.changeset.isStale).toBe(true);
+
+    await expect(f.guard.commitChangeSet(csB)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(f.state.x).toBe(5); // nothing of B applied
+    expect(await pB).toMatchObject({ status: 'stale_transaction', changeSetId: csB });
+  });
+
+  it('43. failed partial undo WITHOUT getStateVersion: conservative bump marks pending B stale (world moved)', async () => {
+    const f = createFailureFixture({ withStateVersion: false });
+    const csA = f.propose([
+      { kind: 'ok', params: { x: 1 } },
+      { kind: 'ok', params: { x: 2 } },
+    ]);
+    await f.guard.commitChangeSet(csA);
+    expect(f.state.x).toBe(2);
+
+    // B is proposed AFTER the commit, on the committed state.
+    const csB = f.propose([{ kind: 'ok', params: { x: 9 } }]);
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(false);
+
+    // Replay order is [inverse(op-2), inverse(op-1)] — the SECOND inverse
+    // throws: op-2's inverse already replayed (done=1, world moved to x=1).
+    f.behaviors.failReverseOnUndo = true;
+    f.behaviors.undoFailOpId = 'op-1';
+    const err = await f.guard.undo().catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'RediniError', code: 'UNDO_FAILED' });
+    expect(String((err as Error).message)).toContain('failed after 1 successful compensations');
+    expect(f.state.x).toBe(1); // partial replay DID move the world
+
+    // The catch bump (no app version) drives the sweep: B stale in both views.
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(true);
+    expect(f.ui.changeSets.get(csB)?.changeset.isStale).toBe(true);
+
+    await expect(f.guard.commitChangeSet(csB)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(f.state.x).toBe(1);
+  });
+
+  it('44. failed partial redo WITHOUT getStateVersion: conservative bump marks pending B stale (world moved)', async () => {
+    const f = createFailureFixture({ withStateVersion: false });
+    const csA = f.propose([
+      { kind: 'ok', params: { x: 1 } },
+      { kind: 'ok', params: { x: 2 } },
+    ]);
+    await f.guard.commitChangeSet(csA);
+    await f.guard.undo();
+    expect(f.state.x).toBe(0);
+
+    // B is proposed AFTER the undo, on the undone state.
+    const csB = f.propose([{ kind: 'ok', params: { x: 9 } }]);
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(false);
+
+    // The forward replay is [op-1, op-2] — op-2 throws on re-application:
+    // op-1 already re-applied (done=1, world moved to x=1).
+    f.behaviors.failForwardOnRedo = true;
+    f.behaviors.redoFailOpId = 'op-2';
+    const err = await f.guard.redo().catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'RediniError', code: 'REDO_FAILED' });
+    expect(String((err as Error).message)).toContain('failed after 1 successful replays');
+    expect(f.state.x).toBe(1); // partial replay DID move the world
+
+    // The catch bump (no app version) drives the sweep: B stale in both views.
+    expect(f.guard.getChangeSet(csB)?.isStale).toBe(true);
+    expect(f.ui.changeSets.get(csB)?.changeset.isStale).toBe(true);
+
+    await expect(f.guard.commitChangeSet(csB)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(f.state.x).toBe(1);
   });
 });

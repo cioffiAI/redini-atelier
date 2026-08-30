@@ -401,8 +401,14 @@ export class RediniGuard {
     const stateVersionBefore = cs.stateVersion;
     const inverses: Operation[] = [];
     const appliedIds: string[] = [];
+    // MELD: counts EVERY attempted runtime.apply in the main apply loop — an
+    // apply that throws may have mutated the world WITHOUT returning an
+    // inverse (we do NOT assume failure-atomic applies), so even a failed
+    // first op makes the bump conservative.
+    let applyAttempts = 0;
     try {
       for (const op of included) {
+        applyAttempts += 1;
         const inverse = def.runtime.apply({
           id: op.id,
           kind: op.kind,
@@ -434,13 +440,13 @@ export class RediniGuard {
       const message = e instanceof Error ? e.message : String(e);
       cs.status = 'failed';
       this.emitUpdate(cs);
-      // A failed commit still touched the runtime — version counters moved even
-      // when compensation restored values (monotonic-version philosophy). The
-      // internal bump keeps the guard working for runtimes WITHOUT
-      // getStateVersion, where a compensation failure leaves the world genuinely
-      // changed with no app-version signal. appliedIds empty = the first op
-      // failed before any mutation → nothing changed, no bump.
-      if (appliedIds.length > 0) this.mutationCounter += 1;
+      // MELD: a failed commit conservatively invalidates pending proposals.
+      // An apply that throws may have mutated state without returning an
+      // inverse (we do NOT assume failure-atomic applies) — any ATTEMPTED
+      // apply bumps the counter, so a pending proposal can never stay reported
+      // fresh over a changed world even for runtimes WITHOUT getStateVersion.
+      // appliedIds stays the rollback-reporting source of truth above.
+      if (applyAttempts > 0) this.mutationCounter += 1;
       this.sweepPendingPreviews();
       if (rollbackFailure) {
         this.audit('failed', cs, {
@@ -630,6 +636,10 @@ export class RediniGuard {
         detail,
       });
       if (cs) this.emitUpdate(cs);
+      // MELD: same conservative invalidation as the commit — the catch is
+      // reachable only after >=1 inverse apply attempt, and a throwing apply
+      // may have mutated the world without returning (no inverse captured).
+      this.mutationCounter += 1;
       // MAJOR 3: the partial replay already moved the state (version bump) —
       // pending ChangeSets must be re-emitted NOW so their isStale flag and
       // previews refresh instead of lying until the next event.
@@ -710,6 +720,10 @@ export class RediniGuard {
         detail,
       });
       if (cs) this.emitUpdate(cs);
+      // MELD: same conservative invalidation as the commit — the catch is
+      // reachable only after >=1 forward apply attempt, and a throwing apply
+      // may have mutated the world without returning an inverse.
+      this.mutationCounter += 1;
       // MAJOR 3: same stale sweep as the undo failure path — the partial
       // replay moved the state, pending ChangeSets must refresh immediately.
       this.sweepPendingPreviews();
