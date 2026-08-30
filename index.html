@@ -8,33 +8,51 @@
     <link rel="stylesheet" href="./src/styles.css" />
   </head>
   <body>
-    <header>
-      <h1>Atelier</h1>
-      <span class="powered">powered by <strong>Redini</strong> — an editable ChangeSet for every agent action</span>
+    <header id="topbar">
+      <div class="brand">
+        <h1>Atelier</h1>
+        <span class="powered">powered by <strong>Redini</strong></span>
+      </div>
+      <div class="history-controls" role="group" aria-label="History">
+        <button id="undo-btn" type="button" disabled aria-label="Undo" title="Undo (⌘Z)">
+          Undo<span class="kbd">⌘Z</span>
+        </button>
+        <button id="redo-btn" type="button" disabled aria-label="Redo" title="Redo (⇧⌘Z)">
+          Redo<span class="kbd">⇧⌘Z</span>
+        </button>
+      </div>
       <span id="webmcp-status" class="status">checking WebMCP…</span>
     </header>
     <main>
-      <section id="canvas-area">
+      <section id="canvas-area" aria-label="Poster canvas">
         <div id="flyer-wrap">
           <div id="flyer" class="flyer"></div>
-          <div id="flyer-ghost" class="flyer ghost hidden" aria-hidden="true"></div>
-          <span id="ghost-badge" class="ghost-badge hidden">PROPOSED — staged, not applied</span>
+          <div id="flyer-ghost" class="flyer ghost hidden"></div>
+          <span id="ghost-badge" class="ghost-badge hidden">PREVIEW — not applied yet</span>
         </div>
+        <p id="canvas-status" aria-live="polite">No changes yet</p>
         <div class="templates">
           <h3>Templates <span class="hint">— clicking applies instantly (you are human)</span></h3>
           <ul id="template-list"></ul>
         </div>
-        <p class="human-hint hint-wide">Try asking the agent: “Make this poster more minimal — change the title, soften the background color, move the logo to the top-left corner.” One intent becomes one editable ChangeSet: preview it, amend parameters, skip operations, commit the subset, undo everything.</p>
+        <p class="human-hint hint-wide">Try asking the agent: “Make this poster more minimal — change the title, soften the background color, move the logo to the top-left corner.” One intent becomes one editable proposal: preview it, amend parameters, skip operations, commit the subset, undo everything.</p>
       </section>
-      <aside id="guardrail-panel">
-        <h3>Redini — ChangeSet negotiation</h3>
-        <p class="tagline">One agent intent → one editable ChangeSet. Preview, amend, cherry-pick, commit atomically, undo deterministically.</p>
-        <div id="change-queue">
-          <p class="empty">No pending agent actions.</p>
+      <aside id="guardrail-panel" aria-label="Proposals and activity">
+        <div class="panel-block">
+          <h3>Proposals</h3>
+          <p class="tagline">Every agent change waits for your review: preview, amend, skip, commit — or decline.</p>
+          <div id="change-queue">
+            <p class="empty">No pending proposals — the last decision is shown below.</p>
+          </div>
         </div>
-        <h4>Audit trail</h4>
-        <ul id="activity-log"></ul>
-        <button id="undo-btn" disabled>Undo last committed ChangeSet</button>
+        <div class="panel-block">
+          <h4>Activity</h4>
+          <ul id="activity-log"></ul>
+          <details class="dev-details">
+            <summary>Developer details</summary>
+            <ul id="dev-log"></ul>
+          </details>
+        </div>
       </aside>
     </main>
     <script type="module" src="./src/main.ts"></script>

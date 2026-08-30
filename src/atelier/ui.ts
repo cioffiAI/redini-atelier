@@ -14,6 +14,7 @@ export function initAtelierUI(
   onPickTemplate: (templateId: string) => void,
 ): { setGhost: (ghost: FlyerDesign | null) => void } {
   const flyerEl = document.getElementById('flyer')!;
+  const flyerWrapEl = document.getElementById('flyer-wrap')!;
   const ghostEl = document.getElementById('flyer-ghost')!;
   const ghostBadge = document.getElementById('ghost-badge')!;
   const tplListEl = document.getElementById('template-list')!;
@@ -72,11 +73,23 @@ export function initAtelierUI(
       if (!ghost) {
         ghostEl.classList.add('hidden');
         ghostBadge.classList.add('hidden');
+        // FIX preview double-render: while no ghost is staged the committed
+        // flyer is the ONLY visible canvas block — and fully reachable again
+        // for assistive tech.
+        flyerWrapEl.classList.remove('previewing');
+        flyerEl.removeAttribute('aria-hidden');
         return;
       }
       paintFlyer(ghostEl, ghost);
       ghostEl.classList.remove('hidden');
       ghostBadge.classList.remove('hidden');
+      // ONE coherent preview: the committed flyer is hidden (visibility, so the
+      // DOM text stays readable for assertions) while the ghost is staged. The
+      // a11y pairing mirrors the visibility exactly: DURING a preview the ghost
+      // IS the meaningful content (never aria-hidden), and the covered #flyer
+      // is removed from the accessibility tree instead.
+      flyerWrapEl.classList.add('previewing');
+      flyerEl.setAttribute('aria-hidden', 'true');
     },
   };
 }

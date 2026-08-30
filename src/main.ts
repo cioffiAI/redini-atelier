@@ -1,9 +1,10 @@
 import './styles.css';
 import { createGuard } from './redini/index';
-import { createDomPanel } from './redini/ui/dom-panel';
+import { createDomPanel, humanizeError } from './redini/ui/dom-panel';
 import type {
   AuditEntry,
   ChangeSetReceipt,
+  RedoEvent,
   UIAdapter,
   UndoEvent,
 } from './redini/index';
@@ -14,12 +15,46 @@ import { initAtelierUI } from './atelier/ui';
 import { templates } from './atelier/templates';
 
 const statusEl = document.getElementById('webmcp-status')!;
+const activityEl = document.getElementById('activity-log')!;
+const devLogEl = document.getElementById('dev-log')!;
+const canvasStatusEl = document.getElementById('canvas-status')!;
+const ghostBadgeEl = document.getElementById('ghost-badge')!;
 
-function logEntry(text: string): void {
-  const ul = document.getElementById('activity-log')!;
+/** Long intents are truncated sensibly for the badge/status line (~40 chars). */
+function shortIntent(intent: string): string {
+  const MAX = 40;
+  if (intent.length <= MAX) return intent;
+  return `${intent.slice(0, MAX - 1).trimEnd()}…`;
+}
+
+/** The ghost badge always names the ChangeSet that OWNS the current preview. */
+function setGhostBadge(intent: string): void {
+  ghostBadgeEl.textContent = `PREVIEW — not applied yet · ${shortIntent(intent)}`;
+}
+
+/** User-facing activity: human words only, no tool names / ids / JSON. */
+function logActivity(text: string): void {
+  const li = document.createElement('li');
+  const time = document.createElement('span');
+  time.className = 'activity-time';
+  time.textContent = new Date().toLocaleTimeString();
+  const body = document.createElement('span');
+  body.className = 'activity-body';
+  body.textContent = text;
+  li.append(time, body);
+  activityEl.prepend(li);
+}
+
+/** Raw/diagnostic lines (ids, tool names, JSON) — collapsible developer details only. */
+function logDev(text: string): void {
   const li = document.createElement('li');
   li.textContent = `${new Date().toLocaleTimeString()} — ${text}`;
-  ul.prepend(li);
+  devLogEl.prepend(li);
+}
+
+function setCanvasStatus(text: string, ok = false): void {
+  canvasStatusEl.textContent = text;
+  canvasStatusEl.classList.toggle('ok', ok);
 }
 
 const params = new URLSearchParams(window.location.search);
@@ -42,18 +77,91 @@ function setGhost(ghost: FlyerDesign | null): void {
 }
 
 /**
+ * Platform-aware shortcut chips: keep the ids/classes stable for e2e — only
+ * the displayed label and tooltip adapt (Mac: ⌘Z / ⇧⌘Z, elsewhere Ctrl+Z).
+ */
+{
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform ?? navigator.userAgent);
+  if (!isMac) {
+    const chips: Array<[string, string, string]> = [
+      ['undo-btn', 'Ctrl+Z', 'Undo (Ctrl+Z)'],
+      ['redo-btn', 'Ctrl+Shift+Z', 'Redo (Ctrl+Shift+Z)'],
+    ];
+    for (const [id, label, title] of chips) {
+      const btn = document.getElementById(id);
+      if (!btn) continue;
+      const kbd = btn.querySelector<HTMLElement>('.kbd');
+      if (kbd) kbd.textContent = label;
+      btn.title = title;
+    }
+  }
+}
+
+/** Friendly display names for the app's real font stacks. */
+const FRIENDLY_FONTS: Record<string, string> = {
+  'Georgia, serif': 'Georgia',
+  'system-ui, sans-serif': 'System UI',
+  'Courier New, monospace': 'Courier New',
+};
+const friendlyFont = (stack: string): string => FRIENDLY_FONTS[stack] ?? stack.split(',')[0].trim();
+
+/**
  * Redini UI adapter: the DOM panel renders the ChangeSet negotiation cards and
  * the receipts; the canvas ghost shows the proposed result BEFORE it happens.
+ * The opHeading/formatValue hints are PRESENTATION ONLY — they translate the
+ * technical operation vocabulary into human words so the panel stays
+ * application-agnostic (Redini's dom-panel has no Atelier knowledge).
  */
 const panel = createDomPanel({
   queueEl: document.getElementById('change-queue')!,
-  logEl: document.getElementById('activity-log')!,
+  logEl: activityEl,
+  devLogEl,
   undoBtn: document.getElementById('undo-btn') as HTMLButtonElement,
+  redoBtn: document.getElementById('redo-btn') as HTMLButtonElement,
   // Typed amendment controls: the app's REAL options and canvas bounds.
   editHints: {
     setFont: { value: { options: FONT_OPTIONS } },
     move: { x: { min: 0, max: CANVAS_W }, y: { min: 0, max: CANVAS_H } },
     resize: { size: { min: 16, max: 200 } },
+  },
+  opHeading: (op) => {
+    const p = op.params;
+    switch (op.kind) {
+      case 'setText': {
+        const f = String(p.field ?? '');
+        if (f === 'title') return 'Title';
+        if (f === 'subtitle') return 'Subtitle';
+        if (f === 'dateLine') return 'Date line';
+        return f;
+      }
+      case 'setFill':
+        return String(p.target) === 'text' ? 'Text color' : 'Background';
+      case 'setFont':
+        return 'Font';
+      case 'move':
+        return 'Logo position';
+      case 'resize':
+        return 'Logo size';
+      default:
+        return op.kind;
+    }
+  },
+  formatValue: (op) => {
+    const p = op.params;
+    switch (op.kind) {
+      case 'setText':
+        return `"${String(p.value ?? '')}"`;
+      case 'setFill':
+        return String(p.value ?? '');
+      case 'setFont':
+        return friendlyFont(String(p.value ?? ''));
+      case 'move':
+        return `${String(p.x ?? 0)}, ${String(p.y ?? 0)}`;
+      case 'resize':
+        return `${String(p.size ?? 0)}px`;
+      default:
+        return '';
+    }
   },
 });
 
@@ -63,20 +171,46 @@ const ui: UIAdapter & { bind?: (g: ReturnType<typeof createGuard>) => void } = {
     const ghost = (preview?.diff as { appliedPreview?: FlyerDesign } | undefined)?.appliedPreview ?? null;
     if (cs.status === 'proposed' || cs.status === 'reviewing') {
       ghostOwner = cs.id;
-      setGhost(ghost);
+      // A stale proposal's preview is misleading: the canvas moved since it
+      // was staged — hide the ghost until the human re-proposes.
+      const painted = !cs.isStale && ghost !== null;
+      setGhost(painted ? ghost : null);
+      if (painted) {
+        // MAJOR 1: with >1 pending ChangeSet the ghost is a single slot — the
+        // badge always names the CURRENT owner (last-emitter-wins).
+        setGhostBadge(cs.intent);
+        // MAJOR 2: the canvas status reflects the preview state, driven by the
+        // same real event; intent named when short.
+        setCanvasStatus(cs.intent.length <= 40 ? `Preview — not applied yet · ${cs.intent}` : 'Preview — not applied yet');
+      }
     } else if (ghostOwner === cs.id) {
       // The ChangeSet that painted the ghost reached a terminal status → clear it.
       ghostOwner = null;
       setGhost(null);
     }
+    // The CANVAS area communicates the last decision too (a small status line
+    // under the poster, driven by the real status — never decorative text).
+    if (cs.status === 'declined') setCanvasStatus('Declined — nothing was applied.');
+    else if (cs.status === 'cancelled') setCanvasStatus('Cancelled — nothing was applied.');
+    else if (cs.status === 'stale') setCanvasStatus('Proposal expired — nothing was applied.');
+    else if (cs.status === 'failed') setCanvasStatus("A change couldn't be applied — nothing was committed.");
+    else if (cs.status === 'undo_failed') setCanvasStatus('Undo failed partway — you can try again.');
   },
   onReceipt(receipt: ChangeSetReceipt): void {
     panel.onReceipt(receipt);
+    setCanvasStatus('Committed', true);
   },
   onUndo(ev: UndoEvent): void {
     panel.onUndo(ev);
     ghostOwner = null;
     setGhost(null);
+    setCanvasStatus('Undone', true);
+  },
+  onRedo(ev: RedoEvent): void {
+    panel.onRedo(ev);
+    ghostOwner = null;
+    setGhost(null);
+    setCanvasStatus('Redone', true);
   },
   onAudit(entry: AuditEntry): void {
     panel.onAudit(entry);
@@ -97,6 +231,35 @@ if (debug) {
 }
 registerAtelierTools(guard, store);
 
+// Editor-style human keybindings. Undo/redo are HUMAN-side only — they are
+// NOT WebMCP tools and never touch the agent tool surface.
+window.addEventListener('keydown', (e: KeyboardEvent) => {
+  // Never hijack text-editing undo (inputs, textareas, contenteditable).
+  const t = e.target;
+  if (
+    t instanceof HTMLInputElement ||
+    t instanceof HTMLTextAreaElement ||
+    (t instanceof HTMLElement && t.isContentEditable)
+  ) {
+    return;
+  }
+  if (!(e.metaKey || e.ctrlKey)) return;
+  const key = e.key.toLowerCase();
+  const wantUndo = key === 'z' && !e.shiftKey;
+  const wantRedo = (key === 'z' && e.shiftKey) || (key === 'y' && e.ctrlKey);
+  if (!wantUndo && !wantRedo) return;
+  e.preventDefault();
+  const p = wantUndo ? guard.undo() : guard.redo();
+  p.catch((err: unknown) => {
+    // The keyboard errors surface in the SAME history error slot the Undo/Redo
+    // buttons use (panel.renderHistoryError) plus the human activity line and
+    // the developer details.
+    panel.renderHistoryError(err);
+    logActivity(humanizeError(err));
+    logDev(err instanceof Error ? err.message : String(err));
+  });
+});
+
 atelierUi = initAtelierUI(store, (templateId) => {
   // Human direct action: even this flows through a ChangeSet (dispatch +
   // immediate commit), so the audit trail records everything and pending agent
@@ -115,14 +278,16 @@ atelierUi = initAtelierUI(store, (templateId) => {
   // MAJOR 3: if dispatch rejects (validation), there is NO ChangeSet to commit —
   // never guess with `.at(-1)`. Locate the staged ChangeSet deterministically:
   // the most recent one with THIS intent that is still pending.
-  p.then((o) => logEntry(`human action: ${JSON.stringify(o)}`)).catch((e: unknown) =>
-    console.error('[atelier] template dispatch failed:', e),
+  p.then((o) => logDev(`human action: ${JSON.stringify(o)}`)).catch((e: unknown) =>
+    logDev(`[atelier] template dispatch failed: ${e instanceof Error ? e.message : String(e)}`),
   );
   const cs = [...guard.getChangeSets()]
     .reverse()
     .find((c) => c.intent === intent && (c.status === 'proposed' || c.status === 'reviewing'));
   if (!cs) return;
-  guard.commitChangeSet(cs.id).catch((e: unknown) => logEntry(e instanceof Error ? e.message : String(e)));
+  guard.commitChangeSet(cs.id).catch((e: unknown) =>
+    logDev(`[atelier] template commit failed: ${e instanceof Error ? e.message : String(e)}`),
+  );
 });
 
 void (async (): Promise<void> => {
@@ -133,10 +298,11 @@ void (async (): Promise<void> => {
   }
 
   statusEl.textContent = 'WebMCP available';
+  statusEl.classList.add('ok');
 
   // Diagnostics: full registered-tool count, visible without devtools.
   await new Promise((r) => setTimeout(r, 200));
   const registered = await mc.getTools().catch(() => [] as { name: string }[]);
   statusEl.textContent = `WebMCP available · ${registered.length} tools`;
-  logEntry(`tools registered: ${registered.map((t) => t.name).join(', ') || 'NONE'}`);
+  logDev(`tools registered: ${registered.map((t) => t.name).join(', ') || 'NONE'}`);
 })();

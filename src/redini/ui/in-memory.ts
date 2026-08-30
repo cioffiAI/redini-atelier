@@ -3,6 +3,7 @@ import type {
   ChangeSet,
   ChangeSetReceipt,
   PreviewInfo,
+  RedoEvent,
   UIAdapter,
   UndoEvent,
 } from '../types';
@@ -12,6 +13,7 @@ export class InMemoryUI implements UIAdapter {
   readonly changeSets = new Map<string, { changeset: ChangeSet; preview: PreviewInfo | null }>();
   readonly receipts: ChangeSetReceipt[] = [];
   readonly undos: UndoEvent[] = [];
+  readonly redos: RedoEvent[] = [];
   readonly audit: AuditEntry[] = [];
 
   onChangesetUpdated(cs: ChangeSet, preview: PreviewInfo | null): void {
@@ -24,6 +26,10 @@ export class InMemoryUI implements UIAdapter {
 
   onUndo(event: UndoEvent): void {
     this.undos.push({ ...event });
+  }
+
+  onRedo(event: RedoEvent): void {
+    this.redos.push({ ...event });
   }
 
   onAudit(entry: AuditEntry): void {

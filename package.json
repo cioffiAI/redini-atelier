@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "node scripts/atelier-e2e.mjs"
   },
   "devDependencies": {
     "puppeteer-core": "^25.9.0",

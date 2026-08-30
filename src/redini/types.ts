@@ -6,8 +6,8 @@
  * addressable operations. The human can preview the result, amend parameters,
  * skip operations (cherry-pick) and atomically commit the subset.
  * The receipt records the distance between the agent's INTENTION and the
- * human co-authored RESULT. Undo is deterministic: limited inverse operations,
- * not generic snapshots.
+ * human co-authored RESULT. Undo/redo is deterministic, editor-style history:
+ * limited inverse operations, not generic snapshots.
  */
 
 export type ChangeSetStatus =
@@ -22,6 +22,21 @@ export type ChangeSetStatus =
   | 'undo_failed';
 
 export type OperationStatus = 'intended' | 'amended' | 'skipped' | 'applied' | 'failed';
+
+/**
+ * Statuses that END the negotiation: no live buttons, no preview, no further
+ * human edits. Single source of truth shared by the guard (decided gates +
+ * preview suppression) and the UI (terminal card rendering).
+ */
+export const DECIDED_CHANGESET_STATUSES: readonly ChangeSetStatus[] = [
+  'committed',
+  'declined',
+  'cancelled',
+  'undone',
+  'stale',
+  'failed',
+  'undo_failed',
+];
 
 /** A single, individually addressable change with a limited inverse. */
 export interface Operation {
@@ -68,6 +83,12 @@ export interface ChangeSet {
   status: ChangeSetStatus;
   proposedAt: number;
   committedAt: number | null;
+  /**
+   * Live staleness flag: the state moved (committed/undo/redo) since this
+   * ChangeSet was proposed. Commit of a stale ChangeSet is lazily rejected
+   * with STALE_TRANSACTION; the flag itself is a preview, not a lock.
+   */
+  isStale: boolean;
 }
 
 export interface ReceiptRow {
@@ -102,8 +123,21 @@ export interface ChangeSetReceipt {
   applied: ReceiptRow[];
   stateVersionBefore: number;
   stateVersionAfter: number;
-  undoToken: string;
   proposedAt: number;
+  committedAt: number;
+}
+
+/** One deterministic step in the editor-style history. */
+export interface HistoryEntry {
+  id: string;
+  changeSetId: string;
+  tool: string;
+  /** The NEGOTIATED forward set (current amended params + labels): what redo replays. */
+  forwardOperations: Operation[];
+  /** Collected inverses in REVERSE application order: what undo replays 1:1. */
+  inverseOperations: Operation[];
+  /** The immutable receipt captured at commit — never rewritten or re-emitted. */
+  receipt: ChangeSetReceipt;
   committedAt: number;
 }
 
@@ -111,8 +145,14 @@ export interface UndoEvent {
   type: 'undo';
   transactionId: string;
   tool: string;
-  undoToken: string;
   undoneAt: number;
+}
+
+export interface RedoEvent {
+  type: 'redo';
+  transactionId: string;
+  tool: string;
+  redoneAt: number;
 }
 
 export type AuditKind =
@@ -122,9 +162,11 @@ export type AuditKind =
   | 'declined'
   | 'failed'
   | 'stale'
-  | 'rolled_back'
   | 'cancelled'
-  | 'undo_failed';
+  | 'undone'
+  | 'undo_failed'
+  | 'redone'
+  | 'redo_failed';
 
 export interface AuditEntry {
   kind: AuditKind;
@@ -230,5 +272,6 @@ export interface UIAdapter {
   onChangesetUpdated(cs: ChangeSet, preview: PreviewInfo | null): void;
   onReceipt(receipt: ChangeSetReceipt): void;
   onUndo(event: UndoEvent): void;
+  onRedo(event: RedoEvent): void;
   onAudit(entry: AuditEntry): void;
 }

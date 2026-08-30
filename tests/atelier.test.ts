@@ -3,6 +3,7 @@ import { createGuard } from '../src/redini/guard';
 import { InMemoryUI } from '../src/redini/ui/in-memory';
 import type { ModelContextLike } from '../src/redini/types';
 import { AtelierStore } from '../src/atelier/store';
+import type { FlyerDesign } from '../src/atelier/store';
 import { registerAtelierTools } from '../src/atelier/tools';
 
 const TOOL_SURFACE = [
@@ -115,7 +116,8 @@ describe('Atelier — design_update ChangeSet over Redini', () => {
     guard.amendOperation(csId, 'op-1', { field: 'title', value: 'U' });
     guard.toggleOperation(csId, 'op-2', false);
     const receipt = await guard.commitChangeSet(csId);
-    await guard.undo(receipt.undoToken);
+    await guard.undo();
+    void receipt;
     void p;
 
     expect(registered.slice().sort()).toEqual(TOOL_SURFACE); // still exactly 5, no select_variant_N
@@ -227,8 +229,7 @@ describe('Atelier — design_update ChangeSet over Redini', () => {
     await f.guard.commitChangeSet(csId);
     expect(f.store.design.title).toBe('Remixed');
 
-    const receipt = f.ui.receipts.at(-1)!;
-    await f.guard.undo(receipt.undoToken);
+    await f.guard.undo();
     expect(f.store.design).toEqual(snapshotBefore);
   });
 
@@ -272,5 +273,120 @@ describe('Atelier — design_update ChangeSet over Redini', () => {
     expect(f.store.design.background).toBe('#141420');
     expect(f.store.design.textColor).toBe('#e8c46a');
     expect(receipt.applied.map((r) => r.id)).toEqual(['op-1', 'op-2', 'op-3']);
+  });
+
+  // ---------- preview coherence (the staged render is ONE derived state) ----------
+
+  it('preview coherence: staged setText shows ONLY the proposed title; the store is untouched', () => {
+    const f = setup();
+    const before = structuredClone(f.store.design);
+    const csId = f.propose('Title only', [{ kind: 'setText', params: { field: 'title', value: 'PROPOSED' } }]);
+    const ghost = (f.ui.changeSets.get(csId)!.preview!.diff as { appliedPreview: FlyerDesign }).appliedPreview;
+    expect(ghost.title).toBe('PROPOSED');
+    expect(f.store.design).toEqual(before); // staged, not applied
+  });
+
+  it('preview coherence: staged move shows ONLY the proposed logo position', () => {
+    const f = setup();
+    const csId = f.propose('Move logo', [{ kind: 'move', params: { x: 12, y: 34 } }]);
+    const ghost = (f.ui.changeSets.get(csId)!.preview!.diff as { appliedPreview: FlyerDesign }).appliedPreview;
+    expect(ghost.logo).toEqual({ x: 12, y: 34, size: 72 }); // proposed position only
+  });
+
+  it('preview coherence: an amendment is reflected in the preview IMMEDIATELY', () => {
+    const f = setup();
+    const csId = f.propose('Amend preview', [{ kind: 'setText', params: { field: 'title', value: 'AGENT' } }]);
+    const ghostBefore = (f.ui.changeSets.get(csId)!.preview!.diff as { appliedPreview: FlyerDesign }).appliedPreview;
+    expect(ghostBefore.title).toBe('AGENT');
+
+    f.guard.amendOperation(csId, 'op-1', { field: 'title', value: 'HUMAN' });
+    const ghostAfter = (f.ui.changeSets.get(csId)!.preview!.diff as { appliedPreview: FlyerDesign }).appliedPreview;
+    expect(ghostAfter.title).toBe('HUMAN');
+  });
+
+  it('preview coherence: toggling an op off removes its effect from the preview; re-including restores it', () => {
+    const f = setup();
+    const csId = f.propose('Toggle skip', [{ kind: 'setText', params: { field: 'title', value: 'X' } }]);
+    expect(
+      (f.ui.changeSets.get(csId)!.preview!.diff as { appliedPreview: FlyerDesign }).appliedPreview.title,
+    ).toBe('X');
+
+    f.guard.toggleOperation(csId, 'op-1', false);
+    expect(
+      (f.ui.changeSets.get(csId)!.preview!.diff as { appliedPreview: FlyerDesign }).appliedPreview.title,
+    ).toBe('Spring Market on Main Street'); // back to the committed value
+
+    f.guard.toggleOperation(csId, 'op-1', true);
+    expect(
+      (f.ui.changeSets.get(csId)!.preview!.diff as { appliedPreview: FlyerDesign }).appliedPreview.title,
+    ).toBe('X');
+  });
+
+  it('preview coherence: decline removes the preview entirely; committed design untouched', async () => {
+    const f = setup();
+    const before = structuredClone(f.store.design);
+    const csId = f.propose('Declined preview', [{ kind: 'setText', params: { field: 'title', value: 'NOPE' } }]);
+    expect(f.ui.changeSets.get(csId)!.preview).not.toBeNull();
+
+    f.guard.declineChangeSet(csId, 'no thanks');
+    // a decided ChangeSet carries NO preview — the ghost must be gone entirely
+    expect(f.ui.changeSets.get(csId)?.preview).toBeNull();
+    expect(f.store.design).toEqual(before);
+    expect(f.guard.getChangeSet(csId)?.status).toBe('declined');
+  });
+
+  it('history: commit → undo → redo replays the EXACT negotiated forward set (amended values)', async () => {
+    const f = setup();
+    const csId = f.propose('Amend round trip', [
+      { kind: 'setText', params: { field: 'title', value: 'AGENT TITLE' } },
+      { kind: 'move', params: { x: 40, y: 40 } },
+    ]);
+    f.guard.amendOperation(csId, 'op-1', { field: 'title', value: 'HUMAN TITLE' });
+    f.guard.amendOperation(csId, 'op-2', { x: 120, y: 90 });
+    const lastPreview = structuredClone(
+      (f.ui.changeSets.get(csId)!.preview!.diff as { appliedPreview: FlyerDesign }).appliedPreview,
+    );
+
+    const receipt = await f.guard.commitChangeSet(csId);
+    // the committed state EXACTLY equals the last previewed state
+    expect(structuredClone(f.store.design)).toEqual(lastPreview);
+    expect(f.store.design.title).toBe('HUMAN TITLE');
+    expect(f.store.design.logo).toEqual({ x: 120, y: 90, size: 72 });
+    void receipt;
+
+    await f.guard.undo();
+    expect(f.store.design.title).toBe('Spring Market on Main Street');
+    expect(f.store.design.logo).toEqual({ x: 500, y: 40, size: 72 });
+    expect(f.guard.getChangeSet(csId)?.status).toBe('undone');
+
+    await f.guard.redo();
+    // redo replays the STORED forward operations: the AMENDED values, not the
+    // agent's originals.
+    expect(f.store.design.title).toBe('HUMAN TITLE');
+    expect(f.store.design.logo).toEqual({ x: 120, y: 90, size: 72 });
+    expect(f.guard.getChangeSet(csId)?.status).toBe('committed');
+  });
+
+  it('history: a new commit after undo clears the redo stack; canRedo/canUndo flip with the stacks', async () => {
+    const f = setup();
+    expect(f.guard.canUndo()).toBe(false);
+    expect(f.guard.canRedo()).toBe(false);
+
+    const csA = f.propose('A', [{ kind: 'setText', params: { field: 'title', value: 'A' } }]);
+    await f.guard.commitChangeSet(csA);
+    expect(f.guard.canUndo()).toBe(true);
+    expect(f.guard.canRedo()).toBe(false);
+
+    await f.guard.undo();
+    expect(f.guard.canUndo()).toBe(false);
+    expect(f.guard.canRedo()).toBe(true);
+
+    const csB = f.propose('B', [{ kind: 'setText', params: { field: 'title', value: 'B' } }]);
+    await f.guard.commitChangeSet(csB);
+    expect(f.guard.canRedo()).toBe(false); // the undone future is gone
+    expect(f.guard.canUndo()).toBe(true);
+    expect(f.store.design.title).toBe('B');
+    void csA;
+    void csB;
   });
 });

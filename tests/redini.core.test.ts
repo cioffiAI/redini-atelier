@@ -150,14 +150,19 @@ function createFailureFixture() {
   };
   // Programming knobs.
   const behaviors = {
-    failReverseOnUndo: false, // inverse of an 'ok' op throws when replayed
+    failReverseOnUndo: false, // inverse of an 'ok' op throws when replayed (undo path)
     failReverseOnRollback: false, // inverse of an 'ok' op throws during commit compensation
+    failForwardOnRedo: false, // forward 'ok' op throws when re-applied (redo path)
     /** When set (and failReverseOnUndo), ONLY this op's inverse throws during undo replay. */
     undoFailOpId: null as string | null,
+    /** When set (and failForwardOnRedo), ONLY this op's forward throws during redo replay. */
+    redoFailOpId: null as string | null,
     reset(): void {
       this.failReverseOnUndo = false;
       this.failReverseOnRollback = false;
+      this.failForwardOnRedo = false;
       this.undoFailOpId = null;
+      this.redoFailOpId = null;
     },
   };
   guard.registerChangeSetTool({
@@ -176,6 +181,13 @@ function createFailureFixture() {
           (behaviors.undoFailOpId === null || op.id === behaviors.undoFailOpId)
         ) {
           throw new Error('undo replay boom');
+        }
+        if (
+          !isInverse &&
+          behaviors.failForwardOnRedo &&
+          (behaviors.redoFailOpId === null || op.id === behaviors.redoFailOpId)
+        ) {
+          throw new Error('redo replay boom');
         }
         const prev = state.x;
         state.x = Number(op.params.x);
@@ -306,28 +318,29 @@ describe('Redini v3 — ChangeSet gates', () => {
       { kind: 'move', params: { x: 400, y: 200 } },
       { kind: 'resize', params: { size: 120 } },
     ]);
-    const receipt = await f.guard.commitChangeSet(csId);
+    await f.guard.commitChangeSet(csId);
     expect(f.state.texts.title).toBe('T2');
     expect(f.state.box.size).toBe(120);
 
-    const ev = await f.guard.undo(receipt.undoToken);
+    const ev = await f.guard.undo();
     expect(f.state.texts.title).toBe('Hello');
     expect(f.state.fills.background).toBe('#ffffff');
     expect(f.state.box).toEqual({ x: 10, y: 10, size: 60 });
     expect(ev.transactionId).toBe(csId);
     expect(f.guard.getChangeSet(csId)?.status).toBe('undone');
-    expect(f.ui.audit.some((a) => a.kind === 'rolled_back' && a.txId === csId)).toBe(true);
+    expect(f.ui.audit.some((a) => a.kind === 'undone' && a.txId === csId)).toBe(true);
   });
 
-  it('7. double undo: deterministic ALREADY_UNDONE', async () => {
+  it('7. double undo after a single commit: deterministic NOTHING_TO_UNDO, state untouched', async () => {
     const f = createCanvasFixture();
     const csId = f.propose('Undo me', [{ kind: 'setText', params: { field: 'title', value: 'X' } }]);
-    const receipt = await f.guard.commitChangeSet(csId);
-    await f.guard.undo(receipt.undoToken);
+    await f.guard.commitChangeSet(csId);
+    await f.guard.undo();
+    expect(f.state.texts.title).toBe('Hello');
 
-    await expect(f.guard.undo(receipt.undoToken)).rejects.toMatchObject({
+    await expect(f.guard.undo()).rejects.toMatchObject({
       name: 'RediniError',
-      code: 'ALREADY_UNDONE',
+      code: 'NOTHING_TO_UNDO',
     });
     expect(f.state.texts.title).toBe('Hello');
   });
@@ -401,7 +414,7 @@ describe('Redini v3 — ChangeSet gates', () => {
         captured.set(tool.name, tool.execute as (i: Record<string, unknown>, o: { signal: AbortSignal }) => Promise<unknown>);
       },
     };
-    const guard2 = createGuard({ ui: { onChangesetUpdated: vi.fn(), onReceipt: vi.fn(), onUndo: vi.fn(), onAudit: vi.fn() }, modelContext: mcp });
+    const guard2 = createGuard({ ui: { onChangesetUpdated: vi.fn(), onReceipt: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onAudit: vi.fn() }, modelContext: mcp });
     const state = { texts: { title: 'Hello' }, version: 0 };
     guard2.registerChangeSetTool({
       name: 'design_update',
@@ -553,27 +566,31 @@ describe('Redini v3 — ChangeSet gates', () => {
     expect(revised.originalLabel).toContain('ORIGINAL');
   });
 
-  it('17. failed undo does NOT consume the token: retry with the same token succeeds (set-semantics inverses)', async () => {
+  it('17. failed undo keeps the entry on the undo stack: canUndo stays true; retry after the fix succeeds', async () => {
     const f = createFailureFixture();
     const csId = f.propose([{ kind: 'ok', params: { x: 7 } }]);
-    const receipt = await f.guard.commitChangeSet(csId);
+    await f.guard.commitChangeSet(csId);
     expect(f.state.x).toBe(7);
 
     f.behaviors.failReverseOnUndo = true;
-    await expect(f.guard.undo(receipt.undoToken)).rejects.toMatchObject({
+    await expect(f.guard.undo()).rejects.toMatchObject({
       name: 'RediniError',
       code: 'UNDO_FAILED',
     });
     expect(f.guard.getChangeSet(csId)?.status).toBe('undo_failed');
     const audit = f.ui.audit.find((a) => a.kind === 'undo_failed' && a.txId === csId);
-    expect(audit?.detail?.undoToken).toBe(receipt.undoToken);
+    expect(audit?.detail?.attempted).toEqual(['op-1']);
+    expect(audit?.detail?.remaining).toEqual([]);
 
-    // Token NOT consumed: a retry (now that the inverse works again) succeeds.
+    // Entry NOT popped: a retry (now that the inverse works again) succeeds.
+    expect(f.guard.canUndo()).toBe(true);
     f.behaviors.failReverseOnUndo = false;
-    const ev = await f.guard.undo(receipt.undoToken);
+    const ev = await f.guard.undo();
     expect(ev.transactionId).toBe(csId);
     expect(f.state.x).toBe(0);
     expect(f.guard.getChangeSet(csId)?.status).toBe('undone');
+    expect(f.guard.canUndo()).toBe(false);
+    expect(f.guard.canRedo()).toBe(true);
   });
 
   it('18. rollback failure: ROLLBACK_FAILED with a TRUTHFUL audit (rolledBack counts actual successes, rollbackFailed: true)', async () => {
@@ -620,11 +637,15 @@ describe('Redini v3 — ChangeSet gates', () => {
     expect(op.originalLabel).toBe(op.label);
   });
 
-  it('20. UNKNOWN_TOKEN: undo with a bogus token fails deterministically', async () => {
+  it('20. empty history: undo and redo both fail deterministically with NOTHING_TO_*', async () => {
     const f = createCanvasFixture();
-    await expect(f.guard.undo('bogus-token')).rejects.toMatchObject({
+    await expect(f.guard.undo()).rejects.toMatchObject({
       name: 'RediniError',
-      code: 'UNKNOWN_TOKEN',
+      code: 'NOTHING_TO_UNDO',
+    });
+    await expect(f.guard.redo()).rejects.toMatchObject({
+      name: 'RediniError',
+      code: 'NOTHING_TO_REDO',
     });
   });
 
@@ -711,20 +732,20 @@ describe('Redini v3 — ChangeSet gates', () => {
     ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
   });
 
-  it('26. multi-op undo failure: TRUTHFUL attempted/remaining audit, token stays unconsumed', async () => {
+  it('26. multi-op undo failure: TRUTHFUL attempted/remaining audit, entry retained on the undo stack', async () => {
     const f = createFailureFixture();
     const csId = f.propose([
       { kind: 'ok', params: { x: 1 } },
       { kind: 'ok', params: { x: 2 } },
       { kind: 'ok', params: { x: 3 } },
     ]);
-    const receipt = await f.guard.commitChangeSet(csId);
+    await f.guard.commitChangeSet(csId);
     expect(f.state.x).toBe(3);
 
     // Only the inverse of op-2 throws during undo replay: op-3's replay succeeds.
     f.behaviors.failReverseOnUndo = true;
     f.behaviors.undoFailOpId = 'op-2';
-    const err = await f.guard.undo(receipt.undoToken).catch((e: unknown) => e);
+    const err = await f.guard.undo().catch((e: unknown) => e);
     expect(err).toMatchObject({ name: 'RediniError', code: 'UNDO_FAILED' });
     expect(String((err as Error).message)).toContain('failed after 1 successful compensations');
     const rediniErr = err as RediniError;
@@ -738,9 +759,278 @@ describe('Redini v3 — ChangeSet gates', () => {
     // partial replay happened exactly once: op-3's inverse restored x to 2
     expect(f.state.x).toBe(2);
     expect(f.guard.getChangeSet(csId)?.status).toBe('undo_failed');
+    // retry-safe: the entry stays on the undo stack — never NOTHING_TO_UNDO.
+    expect(f.guard.canUndo()).toBe(true);
 
-    // Token NOT consumed: the second attempt fails with UNDO_FAILED again —
-    // never ALREADY_UNDONE.
-    await expect(f.guard.undo(receipt.undoToken)).rejects.toMatchObject({ code: 'UNDO_FAILED' });
+    // The second attempt fails with UNDO_FAILED again — the guard never lies.
+    await expect(f.guard.undo()).rejects.toMatchObject({ code: 'UNDO_FAILED' });
+
+    // Once the failure is fixed the SAME entry replays cleanly to the end.
+    f.behaviors.failReverseOnUndo = false;
+    const ev = await f.guard.undo();
+    expect(ev.transactionId).toBe(csId);
+    expect(f.state.x).toBe(0);
+    expect(f.guard.getChangeSet(csId)?.status).toBe('undone');
+    expect(f.guard.canUndo()).toBe(false);
+    expect(f.guard.canRedo()).toBe(true);
+  });
+
+  it('27. canUndo/canRedo transitions: false initially, true after commit, false+true after undo, true+false after redo', async () => {
+    const f = createCanvasFixture();
+    expect(f.guard.canUndo()).toBe(false);
+    expect(f.guard.canRedo()).toBe(false);
+
+    const csId = f.propose('Transitions', [{ kind: 'setText', params: { field: 'title', value: 'V1' } }]);
+    await f.guard.commitChangeSet(csId);
+    expect(f.guard.canUndo()).toBe(true);
+    expect(f.guard.canRedo()).toBe(false);
+
+    await f.guard.undo();
+    expect(f.guard.canUndo()).toBe(false);
+    expect(f.guard.canRedo()).toBe(true);
+
+    await f.guard.redo();
+    expect(f.guard.canUndo()).toBe(true);
+    expect(f.guard.canRedo()).toBe(false);
+  });
+
+  it('28. three commits → three sequential undos, each restoring the exact intermediate state; then NOTHING_TO_UNDO', async () => {
+    const f = createCanvasFixture();
+    const designOf = (): unknown =>
+      structuredClone({ texts: f.state.texts, fills: f.state.fills, font: f.state.font, box: f.state.box });
+    const s0 = designOf();
+
+    const csA = f.propose('A', [{ kind: 'setText', params: { field: 'title', value: 'A' } }]);
+    await f.guard.commitChangeSet(csA);
+    const sA = designOf();
+    const csB = f.propose('B', [{ kind: 'setFill', params: { target: 'background', value: '#111111' } }]);
+    await f.guard.commitChangeSet(csB);
+    const sB = designOf();
+    const csC = f.propose('C', [{ kind: 'move', params: { x: 300, y: 300 } }]);
+    await f.guard.commitChangeSet(csC);
+    const sC = designOf();
+    expect(f.guard.canUndo()).toBe(true);
+
+    await f.guard.undo();
+    expect(designOf()).toEqual(sB);
+    expect(f.guard.getChangeSet(csC)?.status).toBe('undone');
+    await f.guard.undo();
+    expect(designOf()).toEqual(sA);
+    expect(f.guard.getChangeSet(csB)?.status).toBe('undone');
+    await f.guard.undo();
+    expect(designOf()).toEqual(s0);
+    expect(f.guard.canUndo()).toBe(false);
+    expect(f.guard.canRedo()).toBe(true);
+    void csA;
+    void sC;
+    await expect(f.guard.undo()).rejects.toMatchObject({ code: 'NOTHING_TO_UNDO' });
+  });
+
+  it('29. A→B→C commits, undo, undo, redo → state === B exactly', async () => {
+    const f = createCanvasFixture();
+    const designOf = (): unknown =>
+      structuredClone({ texts: f.state.texts, fills: f.state.fills, font: f.state.font, box: f.state.box });
+    const csA = f.propose('A', [{ kind: 'setText', params: { field: 'title', value: 'A' } }]);
+    await f.guard.commitChangeSet(csA);
+    const csB = f.propose('B', [{ kind: 'setFill', params: { target: 'background', value: '#222222' } }]);
+    await f.guard.commitChangeSet(csB);
+    const sB = designOf();
+    const csC = f.propose('C', [{ kind: 'move', params: { x: 250, y: 250 } }]);
+    await f.guard.commitChangeSet(csC);
+
+    await f.guard.undo(); // → B
+    await f.guard.undo(); // → A
+    await f.guard.redo(); // → B again
+    expect(designOf()).toEqual(sB);
+    expect(f.guard.getChangeSet(csB)?.status).toBe('committed');
+    expect(f.guard.getChangeSet(csC)?.status).toBe('undone');
+    void csA;
+  });
+
+  it('30. a new commit after an undo invalidates the redo future: canRedo false, redo throws NOTHING_TO_REDO', async () => {
+    const f = createCanvasFixture();
+    const csA = f.propose('A', [{ kind: 'setText', params: { field: 'title', value: 'A' } }]);
+    await f.guard.commitChangeSet(csA);
+    const csB = f.propose('B', [{ kind: 'setText', params: { field: 'title', value: 'B' } }]);
+    await f.guard.commitChangeSet(csB);
+
+    await f.guard.undo(); // → A; B is the redo future
+    expect(f.guard.canRedo()).toBe(true);
+    const csD = f.propose('D', [{ kind: 'setFill', params: { target: 'background', value: '#DDDDDD' } }]);
+    await f.guard.commitChangeSet(csD);
+
+    expect(f.guard.canRedo()).toBe(false);
+    await expect(f.guard.redo()).rejects.toMatchObject({ code: 'NOTHING_TO_REDO' });
+    expect(f.state.texts.title).toBe('A'); // B was never re-applied
+    expect(f.state.fills.background).toBe('#DDDDDD'); // D committed on top of A
+    void csB;
+  });
+
+  it('31. failed redo: redoStack retained, cs stays undone, TRUTHFUL redo_failed audit, retry succeeds', async () => {
+    const f = createFailureFixture();
+    const csId = f.propose([
+      { kind: 'ok', params: { x: 1 } },
+      { kind: 'ok', params: { x: 2 } },
+      { kind: 'ok', params: { x: 3 } },
+    ]);
+    await f.guard.commitChangeSet(csId);
+    await f.guard.undo();
+    expect(f.state.x).toBe(0);
+    expect(f.guard.canRedo()).toBe(true);
+
+    // op-2's FORWARD apply throws on re-appliance: op-1's replay already ran.
+    f.behaviors.failForwardOnRedo = true;
+    f.behaviors.redoFailOpId = 'op-2';
+    const err = await f.guard.redo().catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'RediniError', code: 'REDO_FAILED' });
+    expect(String((err as Error).message)).toContain('failed after 1 successful replays');
+    const rediniErr = err as RediniError;
+    expect(rediniErr.detail?.attempted).toEqual(['op-1', 'op-2']);
+    expect(rediniErr.detail?.remaining).toEqual(['op-3']);
+    expect(rediniErr.cause).toBeInstanceOf(Error);
+    const audit = f.ui.audit.find((a) => a.kind === 'redo_failed' && a.txId === csId);
+    expect(audit?.detail?.attempted).toEqual(['op-1', 'op-2']);
+    expect(audit?.detail?.remaining).toEqual(['op-3']);
+    // partial replay: op-1 applied (x=1), op-2 failed before mutating
+    expect(f.state.x).toBe(1);
+    expect(f.guard.getChangeSet(csId)?.status).toBe('undone'); // stays undone
+    expect(f.guard.canRedo()).toBe(true); // entry retained on the redo stack
+
+    // Retry is safe (set-semantics forwards): the SAME entry converges.
+    f.behaviors.failForwardOnRedo = false;
+    const ev = await f.guard.redo();
+    expect(ev.transactionId).toBe(csId);
+    expect(f.state.x).toBe(3);
+    expect(f.guard.getChangeSet(csId)?.status).toBe('committed');
+    expect(f.guard.canRedo()).toBe(false);
+    expect(f.guard.canUndo()).toBe(true);
+  });
+
+  it('32. undo and redo each bump the app stateVersion monotonically', async () => {
+    const f = createCanvasFixture();
+    const csId = f.propose('Versions', [{ kind: 'setText', params: { field: 'title', value: 'V' } }]);
+    await f.guard.commitChangeSet(csId);
+    const vCommit = f.state.version;
+    await f.guard.undo();
+    expect(f.state.version).toBeGreaterThan(vCommit);
+    const vUndo = f.state.version;
+    await f.guard.redo();
+    expect(f.state.version).toBeGreaterThan(vUndo);
+  });
+
+  it('33. pending proposal goes stale after an undo of another entry: isStale true, commit rejected with no mutation', async () => {
+    const f = createCanvasFixture();
+    const csA = f.propose('A', [{ kind: 'setText', params: { field: 'title', value: 'A' } }]);
+    await f.guard.commitChangeSet(csA);
+
+    const csX = f.propose('X', [{ kind: 'setText', params: { field: 'title', value: 'X' } }]);
+    expect(f.guard.getChangeSet(csX)?.isStale).toBe(false);
+    expect(f.ui.changeSets.get(csX)?.changeset.isStale).toBe(false);
+
+    await f.guard.undo(); // state moved under X
+
+    expect(f.guard.getChangeSet(csX)?.isStale).toBe(true);
+    expect(f.ui.changeSets.get(csX)?.changeset.isStale).toBe(true);
+    // stale previews are still emitted (so the UI can show the hint) but the
+    // commit is lazily rejected exactly as before.
+    const callsBefore = f.applyCalls.count;
+    await expect(f.guard.commitChangeSet(csX)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(f.applyCalls.count).toBe(callsBefore);
+    expect(f.state.texts.title).toBe('Hello'); // undo restored; X never applied
+    expect(f.guard.getChangeSet(csX)?.status).toBe('stale');
+  });
+
+  it('34. receipts are immutable artifacts: a single onReceipt emission; content unchanged after undo+redo', async () => {
+    const f = createCanvasFixture();
+    const csId = f.propose('Receipt immutability', [{ kind: 'setText', params: { field: 'title', value: 'AGENT' } }]);
+    f.guard.amendOperation(csId, 'op-1', { field: 'title', value: 'HUMAN' });
+    const receipt = await f.guard.commitChangeSet(csId);
+    const receiptSnapshot = structuredClone(receipt);
+    const emissionsBefore = f.ui.receipts.length;
+
+    await f.guard.undo();
+    await f.guard.redo();
+
+    expect(f.ui.receipts.length).toBe(emissionsBefore); // undo/redo never re-emit
+    expect(f.guard.getChangeSet(csId)?.status).toBe('committed');
+    expect(structuredClone(f.ui.receipts.at(-1))).toEqual(receiptSnapshot);
+    expect(f.state.texts.title).toBe('HUMAN'); // the redo committed the amended value
+  });
+
+  it('35. audit trail: distinct committed / undone / redone entries for the same changeSetId', async () => {
+    const f = createCanvasFixture();
+    const csId = f.propose('Audited', [{ kind: 'setText', params: { field: 'title', value: 'A' } }]);
+    await f.guard.commitChangeSet(csId);
+    await f.guard.undo();
+    await f.guard.redo();
+
+    const kinds = f.ui.audit.filter((a) => a.txId === csId).map((a) => a.kind);
+    expect(kinds.filter((k) => k === 'committed')).toHaveLength(1);
+    expect(kinds.filter((k) => k === 'undone')).toHaveLength(1);
+    expect(kinds.filter((k) => k === 'redone')).toHaveLength(1);
+  });
+
+  it('36. getHistory: forwardOperations carry the AMENDED (negotiated) params; inverseOperations are in reverse application order', async () => {
+    const f = createCanvasFixture();
+    const csId = f.propose('History shape', [
+      { kind: 'setText', params: { field: 'title', value: 'AGENT' } },
+      { kind: 'move', params: { x: 10, y: 20 } },
+    ]);
+    f.guard.amendOperation(csId, 'op-1', { field: 'title', value: 'HUMAN' });
+    f.guard.amendOperation(csId, 'op-2', { x: 300, y: 200 });
+    await f.guard.commitChangeSet(csId);
+
+    const [entry] = f.guard.getHistory();
+    expect(f.guard.getHistory()).toHaveLength(1);
+    expect(entry.changeSetId).toBe(csId);
+    // DIRECT structural assertion: the stored forward set is the NEGOTIATED
+    // one — amended params + recomputed labels, not the agent's originals.
+    expect(entry.forwardOperations.map((o) => o.id)).toEqual(['op-1', 'op-2']);
+    expect(entry.forwardOperations[0].params).toEqual({ field: 'title', value: 'HUMAN' });
+    expect(entry.forwardOperations[0].label).toContain('HUMAN');
+    expect(entry.forwardOperations[1].params).toEqual({ x: 300, y: 200 });
+    // The inverses were collected in application order then REVERSED for replay.
+    expect(entry.inverseOperations.map((o) => o.id)).toEqual(['op-2', 'op-1']);
+    expect(entry.inverseOperations[0].params).toEqual({ target: 'box', x: 10, y: 10 });
+    expect(entry.inverseOperations[1].params).toEqual({ field: 'title', value: 'Hello' });
+    // The history receipt is a clone of the emitted one (immune to app-side mutation).
+    expect(entry.receipt.transactionId).toBe(csId);
+    expect(entry.receipt).toEqual(f.ui.receipts.at(-1));
+    expect(entry.receipt).not.toBe(f.ui.receipts.at(-1));
+  });
+
+  it('37. failed undo sweeps pending previews: partial replay bumps the version → pending ChangeSet re-emitted as stale', async () => {
+    const f = createFailureFixture();
+    const cs1 = f.propose([
+      { kind: 'ok', params: { x: 1 } },
+      { kind: 'ok', params: { x: 2 } },
+      { kind: 'ok', params: { x: 3 } },
+    ]);
+    await f.guard.commitChangeSet(cs1);
+
+    // A pending proposal on the committed state (v3).
+    const cs2 = f.propose([{ kind: 'ok', params: { x: 9 } }]);
+    expect(f.guard.getChangeSet(cs2)?.isStale).toBe(false);
+    const previewRefBefore = f.ui.changeSets.get(cs2)?.preview;
+
+    // FAILED undo: op-3's inverse replays (x 3→2, version bump) then op-2's
+    // inverse throws — the state moved under the pending proposal.
+    f.behaviors.failReverseOnUndo = true;
+    f.behaviors.undoFailOpId = 'op-2';
+    await expect(f.guard.undo()).rejects.toMatchObject({ code: 'UNDO_FAILED' });
+    expect(f.state.version).toBe(4); // partial replay DID advance the state
+
+    // MAJOR 3: the pending ChangeSet was re-emitted by the failure-path sweep.
+    expect(f.guard.getChangeSet(cs2)?.isStale).toBe(true);
+    expect(f.ui.changeSets.get(cs2)?.changeset.isStale).toBe(true);
+    // …and its preview came through the UI adapter as a FRESH emission.
+    const previewAfter = f.ui.changeSets.get(cs2)?.preview;
+    expect(previewAfter).not.toBeNull();
+    expect(previewAfter).not.toBe(previewRefBefore);
+    expect((previewAfter?.diff as { appliedPreview: { x: number } }).appliedPreview.x).toBe(9);
+
+    // Enforcement stays lazy: the stale commit is rejected exactly as before.
+    await expect(f.guard.commitChangeSet(cs2)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(f.state.x).toBe(2); // the failed undo left op-3 compensated
   });
 });

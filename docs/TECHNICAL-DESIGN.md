@@ -1,8 +1,9 @@
 # TECHNICAL DESIGN — Redini + Atelier (v3)
 Stato: v3 — 30/08/2026+ — la unità centrale è il **ChangeSet multi-operazione**
 (una intent → un tool call → una transazione editabile). Documenta TUTTE le
-semantiche v3: amendment validato, receipt a righe strutturate, lifecycle
-dell'undo token, EXECUTION_FAILED vs ROLLBACK_FAILED, execute-che-non-rifiuta,
+semantiche v3: amendment validato, receipt a righe strutturate, history
+editor-style (undoStack/redoStack), EXECUTION_FAILED vs ROLLBACK_FAILED,
+execute-che-non-rifiuta,
 schema strict per-kind.
 
 ---
@@ -53,7 +54,7 @@ l'umano: amend (validato) | toggle (cherry-pick) | commit subset | decline
       ↓
 COMMIT → receipt 4 sezioni → risposta strutturata diretta all'agente
       ↓
-UNDO deterministico (inverse operations, token monouso)
+UNDO/REDO deterministici (history editor-style: undoStack/redoStack, inverse operations)
 ```
 
 ### Stato del ChangeSet
@@ -102,19 +103,26 @@ interface ChangeSetReceipt {
   applied: ReceiptRow[];         // VALORI REALMENTE COMMITTATI (params+label correnti)
   stateVersionBefore: number;
   stateVersionAfter: number;
-  undoToken: string;
   proposedAt: number;
   committedAt: number;
 }
 ```
 
+(La receipt non porta alcun token di undo: l'undo è editor-style via
+`undoStack`/`redoStack` — §7. La receipt emessa resta l'oggetto app-facing; la
+copia ARCHIVIATA nella
+`HistoryEntry` è un `structuredClone`, così una mutazione da parte dell'app
+non può corrompere la storia.)
+
 Rendering nel pannello:
 
 ```
-INTENDED                 → label originali dell'agente
-AMENDED BY HUMAN         → "label corrente (was: label originale)"
-SKIPPED BY HUMAN         → label correnti delle op escluse
-APPLIED (committed values) → label correnti delle op applicate, nell'ordine
+INTENDED                 → righe originali dell'agente (label + params originali)
+AMENDED BY YOU           → "prima → dopo" per ogni operazione cambiata dall'umano
+SKIPPED BY YOU           → righe correnti delle op escluse
+APPLIED                  → righe coi VALORI REALMENTE COMMITTATI (✓ per ogni op)
+FOOTER                   → "State vN → vM"
+DEV DETAILS              → sezioni strutturate (ricevuta, tool, intent, id, date)
 ```
 
 La distanza intenzione → risultato è il cuore del prodotto: SKIPPED non appare MAI in APPLIED; le righe amended conservano entrambi i valori.
@@ -146,15 +154,17 @@ Se un `apply` fallisce:
 della UI umana, NON dell'agente: la promessa NON viene sbloccata, il ChangeSet resta
 `reviewing` (l'umano può re-includere), l'errore viene rilanciato solo al chiamante UI.
 
-## 7. Undo token lifecycle
+## 7. History editor-style: undo stack / redo stack
 
-`undo(undoToken)`:
+`undo()` / `redo()` (nessun token monouso — v3 history):
 
-- Replay degli inversi in ordine inverso DENTRO try/catch, tracciando il
-  progresso reale (`done`: gli id degli inversi effettivamente riusciti).
-- Il token è marcato `consumed` SOLO dopo che TUTTI gli inversi sono riusciti.
-- Se un inverso fallisce: il token NON viene consumato, stato `undo_failed`,
-  audit `undo_failed` con detail TRUTHFUL — mai l'elenco totale:
+- `undo()`: replay degli inversi dell'entry in cima a `undoStack`
+  (`entry.inverseOperations` è GIÀ in ordine inverso di applicazione) DENTRO
+  try/catch, tracciando il progresso reale (`done`: gli id degli inversi
+  effettivamente riusciti).
+- L'entry viene spostata su `redoStack` SOLO dopo che TUTTI gli inversi sono
+  riusciti. Se un inverso fallisce: l'entry RESTA su `undoStack`, stato
+  `undo_failed`, audit `undo_failed` con detail TRUTHFUL — mai l'elenco totale:
   - `attempted` = `[...done, <id dell'inverso fallito>]` (ciò che è stato
     davvero provato, nell'ordine di replay),
   - `remaining` = id degli inversi NON ancora rieseguiti (quelli dopo il
@@ -163,10 +173,26 @@ della UI umana, NON dell'agente: la promessa NON viene sbloccata, il ChangeSet r
   Il messaggio del RediniError deriva da `done.length` ("failed after N
   successful compensations"); il bundle viaggia in `detail` e l'errore reale
   in `cause`: `RediniError('UNDO_FAILED', msg, cause, detail)`.
-- Nota di design: gli inversi hanno semantica set (idempotente) — quelli di Atelier la rispettano (ogni inverso imposta un valore concreto), quindi riprovare un undo fallito con lo stesso token è sicuro.
-- Successo: stato `undone`, audit `rolled_back`, `ui.onUndo`, bump del mutation counter.
+- `redo()`: riapplica le `forwardOperations` STORED (il set NEGOZIATO — params
+  e label amendati) in ordine di applicazione, catturando inversi FRESCHI:
+  l'entry che torna su `undoStack` porta gli inversi esatti della redo. Su
+  failure l'entry RESTA su `redoStack`, il ChangeSet resta `undone`, audit
+  `redo_failed` con lo stesso bundle TRUTHFUL (`attempted`/`remaining`/`cause`),
+  e un retry converge (forward set-semantics).
+- Nota di design: inversi e forward hanno semantica set (idempotente) — quelli
+  di Atelier la rispettano (ogni op imposta un valore concreto), quindi
+  riprovare un undo/redo fallito è sicuro.
+- Successo undo: stato `undone`, audit `undone {operations: <n inversi>}`,
+  `ui.onUndo`, bump del mutation counter. Successo redo: stato `committed`
+  (anche se il cs era rimasto `undo_failed`), audit `redone {applied: <n>}`,
+  `ui.onRedo`, bump del counter. Un NUOVO commit svuota il redo stack (il
+  futuro undone è invalidato).
+- I percorsi di FAILURE di undo/redo applicano mutazioni parziali (la versione
+  dello stato avanza): il guard chiama subito `sweepPendingPreviews()` così i
+  ChangeSet pending vengono ri-emessi con `isStale` e preview aggiornati — niente
+  ghost/card menzogneri in attesa del prossimo evento.
 
-**Limite noto**: le mappe `changeSets` e `undoRecords` non vengono potate — la
+**Limite noto**: le mappe `changeSets` e gli stack non vengono potati — la
 memoria cresce con il numero di transazioni. Accettabile e intenzionale per
 sessioni demo brevi (bounded); nessun pruning in v3.
 
@@ -229,9 +255,10 @@ rifiutate (additionalProperties:false), e `intent` mancante è `INVALID_OPERATIO
   UI usa `createElement`/`textContent`; `innerHTML = ''` solo come clear.
 - Lo stylesheet vive in `src/styles.css`: blocchi morti rimossi (spike zone,
   playground, vecchio form ordini, varianti), duplicati fusi, stili nuovi per la negoziazione live
-  (`.tx-card`, `.tx-chip` per stato incluso cancelled/undo_failed, `.tx-intent`,
-  `.tx-op`, `.op-mark`, `.op-label`, `.op-amended`, `.op-edit-btn`, form di edit,
-  `.tx-commit/.tx-decline`, `.tx-error`, `.receipt`, `.receipt-pre`).
+  (`.tx-card`, `.tx-chip` per stato incluso cancelled/undo_failed, `.tx-op`,
+  `.op-heading`, `.op-value`, `.op-amended-badge`, `.op-skipped-badge`,
+  `.op-edit-btn`, `.tx-edit-form`, `.tx-commit/.tx-decline`, `.tx-error`,
+  `.receipt` con sezioni strutturate, `.dev-details`).
 - Il ghost preview (proposta sul canvas prima del commit) resta: viene dipinto
   dal ChangeSet che lo ha proposto e cancellato quando QUELLO raggiunge un esito
   terminale.

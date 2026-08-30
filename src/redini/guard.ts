@@ -1,5 +1,6 @@
 import { RediniError } from './errors';
 import { deepEqual } from './utils';
+import { DECIDED_CHANGESET_STATUSES } from './types';
 import type {
   AgentOutcome,
   AuditEntry,
@@ -7,10 +8,12 @@ import type {
   ChangeSetOperation,
   ChangeSetReceipt,
   ChangeSetToolDefinition,
+  HistoryEntry,
   ModelContextLike,
   Operation,
   PreviewInfo,
   ReceiptRow,
+  RedoEvent,
   SafeToolDefinition,
   UIAdapter,
   UndoEvent,
@@ -50,14 +53,6 @@ interface InternalChangeSet {
   settled: boolean;
 }
 
-interface UndoRecord {
-  csId: string;
-  tool: string;
-  /** Inverses in REVERSE application order: undo replays them 1:1. */
-  inverses: Operation[];
-  consumed: boolean;
-}
-
 export interface GuardOptions {
   ui: UIAdapter & {
     /** Optional hook called by createGuard to hand the guard to the adapter. */
@@ -70,15 +65,6 @@ export interface GuardOptions {
   idFactory?: () => string;
 }
 
-const DECIDED_STATUSES: ChangeSet['status'][] = [
-  'committed',
-  'declined',
-  'cancelled',
-  'undone',
-  'stale',
-  'failed',
-  'undo_failed',
-];
 
 function defaultInputSchema(kinds: string[]): object {
   return {
@@ -135,7 +121,10 @@ function executeFailedResult(changeSetId: string | null, e: unknown): AgentOutco
 export class RediniGuard {
   private readonly registrations = new Map<string, Registration>();
   private readonly changeSets = new Map<string, InternalChangeSet>();
-  private readonly undoRecords = new Map<string, UndoRecord>();
+  /** Editor-style history: top of the undo stack = most recently committed entry. */
+  private readonly undoStack: HistoryEntry[] = [];
+  /** Top of the redo stack = the most recently undone entry (cleared by every new commit). */
+  private readonly redoStack: HistoryEntry[] = [];
   /** Redini-owned change counter: the stale guard works even if the app never bumps its version. */
   private mutationCounter = 0;
   private readonly ui: UIAdapter;
@@ -312,7 +301,7 @@ export class RediniGuard {
   toggleOperation(csId: string, opId: string, include: boolean): ChangeSet {
     const cs = this.requireCs(csId);
     const op = this.requireOp(cs, opId);
-    if (DECIDED_STATUSES.includes(cs.status)) {
+    if (DECIDED_CHANGESET_STATUSES.includes(cs.status)) {
       throw new RediniError('ALREADY_DECIDED', `ChangeSet ${csId} is already ${cs.status}`);
     }
     op.included = include;
@@ -338,7 +327,7 @@ export class RediniGuard {
   ): { changeset: ChangeSet; preview: PreviewInfo | null } {
     const cs = this.requireCs(csId);
     const op = this.requireOp(cs, opId);
-    if (DECIDED_STATUSES.includes(cs.status)) {
+    if (DECIDED_CHANGESET_STATUSES.includes(cs.status)) {
       throw new RediniError('ALREADY_DECIDED', `ChangeSet ${csId} is already ${cs.status}`);
     }
     if (typeof params !== 'object' || params === null || Array.isArray(params)) {
@@ -377,7 +366,7 @@ export class RediniGuard {
   async commitChangeSet(csId: string): Promise<ChangeSetReceipt> {
     const cs = this.requireCs(csId);
     const def = this.changesetDef(cs.tool);
-    if (DECIDED_STATUSES.includes(cs.status)) {
+    if (DECIDED_CHANGESET_STATUSES.includes(cs.status)) {
       throw new RediniError('ALREADY_DECIDED', `ChangeSet ${csId} is already ${cs.status}`);
     }
 
@@ -485,7 +474,6 @@ export class RediniGuard {
     this.mutationCounter += 1;
     cs.status = 'committed';
     cs.committedAt = this.now();
-    const undoToken = this.nextId();
     const stateVersionAfter = def.getStateVersion?.() ?? this.mutationCounter;
 
     const originalRow = (o: InternalOp): ReceiptRow => ({
@@ -520,16 +508,34 @@ export class RediniGuard {
       applied: included.map((o) => currentRow(o)),
       stateVersionBefore,
       stateVersionAfter,
-      undoToken,
       proposedAt: cs.proposedAt,
       committedAt: cs.committedAt,
     };
-    this.undoRecords.set(undoToken, {
-      csId: cs.id,
+    // Editor-style history entry. forwardOperations are the NEGOTIATED set —
+    // current (amended) params + labels — because that is EXACTLY what redo
+    // must replay to re-commit this subset. inverseOperations restore the
+    // previous state in reverse application order. A new commit invalidates
+    // the undone future: the redo stack is cleared.
+    const entry: HistoryEntry = {
+      id: this.nextId(),
+      changeSetId: cs.id,
       tool: cs.tool,
-      inverses: [...inverses].reverse(),
-      consumed: false,
-    });
+      forwardOperations: included.map((o) => ({
+        id: o.id,
+        kind: o.kind,
+        label: o.label,
+        originalLabel: o.originalLabel,
+        params: structuredClone(o.params),
+      })),
+      inverseOperations: [...inverses].reverse(),
+      // The HISTORY copy is a structuredClone of the receipt: the emitted
+      // receipt stays the app-facing object — mutating it can never corrupt
+      // the stored entry (receipts remain behaviorally immutable artifacts).
+      receipt: structuredClone(receipt),
+      committedAt: cs.committedAt,
+    };
+    this.undoStack.push(entry);
+    this.redoStack.length = 0;
 
     this.ui.onReceipt(receipt);
     const humanEdited = receipt.amended.length > 0 || receipt.skippedByHuman.length > 0;
@@ -540,6 +546,7 @@ export class RediniGuard {
       skipped: receipt.skippedByHuman.length,
     });
     this.emitUpdate(cs);
+    this.sweepPendingPreviews();
     this.settle(cs, {
       status: 'committed',
       changeSetId: cs.id,
@@ -554,7 +561,7 @@ export class RediniGuard {
   /** Human decision: reject the whole ChangeSet. Nothing is ever applied. */
   declineChangeSet(csId: string, reason?: string): ChangeSet {
     const cs = this.requireCs(csId);
-    if (DECIDED_STATUSES.includes(cs.status)) {
+    if (DECIDED_CHANGESET_STATUSES.includes(cs.status)) {
       throw new RediniError('ALREADY_DECIDED', `ChangeSet ${csId} is already ${cs.status}`);
     }
     cs.status = 'declined';
@@ -572,72 +579,177 @@ export class RediniGuard {
   }
 
   /**
-   * Deterministic rollback: replays the stored inverse operations, last-applied first.
-   *
-   * FIX E — undo token lifecycle: the token is marked consumed ONLY after ALL
-   * inverses succeeded. Inverses are expected to be set-semantics (idempotent) —
-   * Atelier's are (each inverse sets a concrete value), so retrying a failed undo
-   * with the same token is safe. On failure the token stays usable, the ChangeSet
-   * becomes 'undo_failed', an 'undo_failed' audit entry with structured detail is
-   * emitted, and a typed UNDO_FAILED RediniError is thrown.
+   * Deterministic rollback: replays the stored inverse operations, last-applied
+   * first (entry.inverseOperations is already in reverse application order).
+   * The entry is popped from the undo stack only AFTER every inverse succeeded;
+   * on failure it STAYS on the stack, the ChangeSet becomes 'undo_failed' and a
+   * truthful 'undo_failed' audit is emitted. Retrying a failed undo is safe:
+   * the inverses are set-semantics (idempotent) — Atelier's are (each inverse
+   * sets a concrete value) — so a partial replay converges on retry.
    */
-  async undo(undoToken: string): Promise<UndoEvent> {
-    const record = this.undoRecords.get(undoToken);
-    if (!record) throw new RediniError('UNKNOWN_TOKEN', `no undo record for token "${undoToken}"`);
-    if (record.consumed) throw new RediniError('ALREADY_UNDONE', `token ${undoToken} was already used`);
-
-    const def = this.changesetDef(record.tool);
-    // Truthful progress: `done` tracks the inverses ACTUALLY replayed before the
+  async undo(): Promise<UndoEvent> {
+    if (this.undoStack.length === 0) {
+      throw new RediniError('NOTHING_TO_UNDO', 'nothing to undo');
+    }
+    const entry = this.undoStack[this.undoStack.length - 1];
+    const def = this.changesetDef(entry.tool);
+    // Truthful progress: `done` tracks the inverses ACTUALLY replayed before a
     // failure — the audit must never report the whole list or its total length.
     const done: string[] = [];
     try {
-      for (const inv of record.inverses) {
+      for (const inv of entry.inverseOperations) {
         def.runtime.apply(inv);
         done.push(inv.id);
       }
     } catch (e) {
-      const failingInverseId = record.inverses[done.length]?.id ?? 'unknown';
+      const failingInverseId = entry.inverseOperations[done.length]?.id ?? 'unknown';
       const cause = e instanceof Error ? e.message : String(e);
       const detail = {
-        undoToken,
         attempted: [...done, failingInverseId],
-        remaining: record.inverses.slice(done.length + 1).map((inv) => inv.id),
+        remaining: entry.inverseOperations.slice(done.length + 1).map((inv) => inv.id),
         cause,
       };
-      const cs = this.changeSets.get(record.csId);
+      const cs = this.changeSets.get(entry.changeSetId);
       if (cs) cs.status = 'undo_failed';
       this.ui.onAudit({
         kind: 'undo_failed',
-        txId: record.csId,
-        tool: record.tool,
+        txId: entry.changeSetId,
+        tool: entry.tool,
         at: this.now(),
         detail,
       });
       if (cs) this.emitUpdate(cs);
+      // MAJOR 3: the partial replay already moved the state (version bump) —
+      // pending ChangeSets must be re-emitted NOW so their isStale flag and
+      // previews refresh instead of lying until the next event.
+      this.sweepPendingPreviews();
       throw new RediniError(
         'UNDO_FAILED',
-        `undo of ${record.csId} failed after ${done.length} successful compensations`,
+        `undo of ${entry.changeSetId} failed after ${done.length} successful compensations`,
         e,
         detail,
       );
     }
-    // Only now — after every inverse succeeded — is the token consumed.
-    record.consumed = true;
+    // Only now — after every inverse succeeded — does the entry move to the
+    // redo stack (top = most recently undone).
+    this.undoStack.pop();
+    this.redoStack.push(entry);
     this.mutationCounter += 1;
 
-    const cs = this.changeSets.get(record.csId);
+    const cs = this.changeSets.get(entry.changeSetId);
     if (cs && (cs.status === 'committed' || cs.status === 'undo_failed')) cs.status = 'undone';
     const ev: UndoEvent = {
       type: 'undo',
-      transactionId: record.csId,
-      tool: record.tool,
-      undoToken,
+      transactionId: entry.changeSetId,
+      tool: entry.tool,
       undoneAt: this.now(),
     };
     this.ui.onUndo(ev);
-    this.audit('rolled_back', cs, { undoToken, operations: record.inverses.length });
+    this.audit('undone', cs, { operations: entry.inverseOperations.length });
     if (cs) this.emitUpdate(cs);
+    this.sweepPendingPreviews();
     return ev;
+  }
+
+  /**
+   * Deterministic redo: re-applies the entry's stored FORWARD operations — the
+   * negotiated (amended) set — in application order, capturing FRESH inverses
+   * so the entry moving back to the undo stack undoes this redo exactly. On
+   * failure the entry STAYS on the redo stack, the ChangeSet stays 'undone'
+   * and a truthful 'redo_failed' audit is emitted. Retrying a failed redo is
+   * safe: the forward operations are set-semantics (each writes a concrete
+   * value), so a partial replay converges on retry.
+   */
+  async redo(): Promise<RedoEvent> {
+    if (this.redoStack.length === 0) {
+      throw new RediniError('NOTHING_TO_REDO', 'nothing to redo');
+    }
+    const entry = this.redoStack[this.redoStack.length - 1];
+    const def = this.changesetDef(entry.tool);
+    const freshInverses: Operation[] = [];
+    const done: string[] = [];
+    try {
+      for (const op of entry.forwardOperations) {
+        // Clone discipline mirrored from commit: a mutating app runtime can
+        // never corrupt the params stored in the history entry.
+        const inverse = def.runtime.apply({
+          id: op.id,
+          kind: op.kind,
+          label: op.label,
+          originalLabel: op.originalLabel,
+          params: structuredClone(op.params),
+        });
+        freshInverses.push(inverse);
+        done.push(op.id);
+      }
+    } catch (e) {
+      const failingOpId = entry.forwardOperations[done.length]?.id ?? 'unknown';
+      const cause = e instanceof Error ? e.message : String(e);
+      const detail = {
+        attempted: [...done, failingOpId],
+        remaining: entry.forwardOperations.slice(done.length + 1).map((op) => op.id),
+        cause,
+      };
+      const cs = this.changeSets.get(entry.changeSetId);
+      this.ui.onAudit({
+        kind: 'redo_failed',
+        txId: entry.changeSetId,
+        tool: entry.tool,
+        at: this.now(),
+        detail,
+      });
+      if (cs) this.emitUpdate(cs);
+      // MAJOR 3: same stale sweep as the undo failure path — the partial
+      // replay moved the state, pending ChangeSets must refresh immediately.
+      this.sweepPendingPreviews();
+      throw new RediniError(
+        'REDO_FAILED',
+        `redo of ${entry.changeSetId} failed after ${done.length} successful replays`,
+        e,
+        detail,
+      );
+    }
+    this.redoStack.pop();
+    entry.inverseOperations = freshInverses.reverse();
+    this.undoStack.push(entry);
+    this.mutationCounter += 1;
+
+    const cs = this.changeSets.get(entry.changeSetId);
+    // Symmetric with undo(): a redo also repairs a changeSet left 'undo_failed'.
+    if (cs && (cs.status === 'undone' || cs.status === 'undo_failed')) cs.status = 'committed';
+    // The receipt is an immutable historical artifact: it is NOT rewritten or
+    // re-emitted for the redo — undo+redo leave the negotiation record intact.
+    const ev: RedoEvent = {
+      type: 'redo',
+      transactionId: entry.changeSetId,
+      tool: entry.tool,
+      redoneAt: this.now(),
+    };
+    this.ui.onRedo(ev);
+    this.audit('redone', cs, { applied: done.length });
+    if (cs) this.emitUpdate(cs);
+    this.sweepPendingPreviews();
+    return ev;
+  }
+
+  /** Editor-style availability: a non-empty undo stack. */
+  canUndo(): boolean {
+    return this.undoStack.length > 0;
+  }
+
+  /**
+   * Read-only view of the whole editor history: undone entries first (oldest
+   * commit at index 0), redo entries after them. Entries expose the stored
+   * (amended) forward operations, the reverse-order inverses and a CLONED
+   * receipt — safe for audit/debug surfaces.
+   */
+  getHistory(): readonly HistoryEntry[] {
+    return [...this.undoStack, ...this.redoStack];
+  }
+
+  /** Editor-style availability: a non-empty redo stack. */
+  canRedo(): boolean {
+    return this.redoStack.length > 0;
   }
 
   getChangeSet(csId: string): ChangeSet | undefined {
@@ -699,6 +811,7 @@ export class RediniGuard {
       status: cs.status,
       proposedAt: cs.proposedAt,
       committedAt: cs.committedAt,
+      isStale: this.csIsStale(cs),
     };
   }
 
@@ -720,7 +833,33 @@ export class RediniGuard {
   }
 
   private emitUpdate(cs: InternalChangeSet): void {
-    this.ui.onChangesetUpdated(this.publicCs(cs), this.previewFor(cs));
+    // A decided ChangeSet has no live preview: once the subset is committed /
+    // declined / undone / stale, the staged preview is gone entirely.
+    const preview = DECIDED_CHANGESET_STATUSES.includes(cs.status) ? null : this.previewFor(cs);
+    this.ui.onChangesetUpdated(this.publicCs(cs), preview);
+  }
+
+  /**
+   * Stale sweep: after every successful commit/undo/redo the pending ChangeSets
+   * are re-emitted so their previews recompute against the NEW state and their
+   * isStale flag refreshes (enforcement stays lazy, at commit time).
+   */
+  private sweepPendingPreviews(): void {
+    for (const cs of this.changeSets.values()) {
+      if (cs.status === 'proposed' || cs.status === 'reviewing') this.emitUpdate(cs);
+    }
+  }
+
+  /** Same predicate as the commit-time stale check. */
+  private csIsStale(cs: InternalChangeSet): boolean {
+    let versionChanged = false;
+    try {
+      const def = this.changesetDef(cs.tool);
+      versionChanged = def.getStateVersion !== undefined && def.getStateVersion() !== cs.stateVersion;
+    } catch {
+      // Tool registration gone (abort teardown): only Redini's own counter can guard.
+    }
+    return versionChanged || this.mutationCounter !== cs.mutationIndex;
   }
 
   private settle(cs: InternalChangeSet, outcome: AgentOutcome): void {
