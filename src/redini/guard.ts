@@ -87,27 +87,44 @@ export class RediniGuard {
     this.mcp = mc;
   }
 
-  registerSafeTool(def: SafeToolDefinition): void {
+  registerSafeTool(def: SafeToolDefinition, options?: { signal?: AbortSignal }): void {
     this.registrations.set(def.name, { kind: 'safe', def });
-    this.mcp?.registerTool({
-      name: def.name,
-      description: def.description,
-      inputSchema: def.inputSchema,
-      annotations: def.annotations ?? { readOnlyHint: true },
-      execute: (input, options) => def.execute(input, options),
-    });
+    this.mcp?.registerTool(
+      {
+        name: def.name,
+        title: def.title,
+        description: def.description,
+        inputSchema: def.inputSchema,
+        annotations: def.annotations ?? { readOnlyHint: true },
+        execute: (input, execOptions) => def.execute(input, execOptions),
+      },
+      options,
+    );
+    // Keep the in-page registry consistent with the WebMCP registry on abort,
+    // so dynamic unregistration behaves the same with and without a model context.
+    options?.signal?.addEventListener(
+      'abort',
+      () => {
+        this.registrations.delete(def.name);
+      },
+      { once: true },
+    );
   }
 
-  registerTransactionalTool(def: TransactionalToolDefinition): void {
+  registerTransactionalTool(def: TransactionalToolDefinition, options?: { signal?: AbortSignal }): void {
     this.registrations.set(def.name, { kind: 'transaction', def });
-    this.mcp?.registerTool({
-      name: def.name,
-      description: def.description,
-      inputSchema: def.inputSchema,
-      annotations: def.annotations,
-      execute: async (input, options) =>
-      toMcpResult((await this.dispatch(def.name, input, options.signal)) as AgentOutcome),
-    });
+    this.mcp?.registerTool(
+      {
+        name: def.name,
+        title: def.title,
+        description: def.description,
+        inputSchema: def.inputSchema,
+        annotations: def.annotations,
+        execute: async (input, execOptions) =>
+          toMcpResult((await this.dispatch(def.name, input, execOptions.signal)) as AgentOutcome),
+      },
+      options,
+    );
   }
 
   register(def: RegisterToolRequest): void {

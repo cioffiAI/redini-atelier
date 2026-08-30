@@ -103,6 +103,8 @@ export interface ToolExecutionContext {
 /** Read-only (or side-effect-free-for-the-agent) tool: executes immediately. */
 export interface SafeToolDefinition {
   name: string;
+  /** Human-readable label (WebMCP ModelContextTool.title). */
+  title?: string;
   description: string;
   inputSchema?: object;
   annotations?: ToolAnnotations;
@@ -112,6 +114,8 @@ export interface SafeToolDefinition {
 /** Mutating tool: every call becomes a staged transaction decided by the human. */
 export interface TransactionalToolDefinition {
   name: string;
+  /** Human-readable label (WebMCP ModelContextTool.title). */
+  title?: string;
   description: string;
   inputSchema?: object;
   annotations?: ToolAnnotations;
@@ -138,6 +142,7 @@ export interface ModelContextLike {
   registerTool(
     tool: {
       name: string;
+      title?: string;
       description: string;
       inputSchema?: object;
       annotations?: ToolAnnotations;

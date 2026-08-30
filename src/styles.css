@@ -73,6 +73,95 @@ main {
 .spike-zone input { padding: 0.35rem; border: 1px solid #ccc5b9; border-radius: 4px; }
 .spike-zone button { padding: 0.45rem 0.8rem; border: 1px solid #ccc5b9; border-radius: 4px; background: #f0ede6; cursor: pointer; }
 
+/* ---------- Atelier ---------- */
+
+.tagline { font-size: 0.78rem; color: #666; margin: 0 0 0.8rem; }
+.hint { font-weight: 400; font-size: 0.72rem; color: #888; }
+
+#flyer-wrap { position: relative; }
+
+.flyer {
+  min-height: 380px;
+  background: #fffdf8;
+  border: 1px solid #ddd8d0;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem;
+}
+
+.flyer h2 { font-size: 2rem; margin: 0 0 0.5rem; }
+.flyer p { margin: 0.25rem 0; color: inherit; opacity: 0.85; }
+.flyer-date { font-size: 0.9rem; }
+.flyer-clipart { font-size: 3rem; margin-bottom: 0.5rem; }
+
+.flyer.ghost {
+  position: absolute;
+  inset: 0;
+  opacity: 0.45;
+  border: 2px dashed #b0532c;
+  pointer-events: none;
+}
+.flyer.ghost.hidden { display: none; }
+
+.ghost-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: #b0532c;
+  color: #fff;
+  font-size: 0.7rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  letter-spacing: 0.03em;
+}
+.ghost-badge.hidden { display: none; }
+
+.panel-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+.templates, .variants, .checkout {
+  background: #fff;
+  border: 1px solid #ddd8d0;
+  border-radius: 8px;
+  padding: 1rem;
+}
+.templates h3, .variants h3, .checkout h3 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+.templates ul, .variants ul, #orders-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.templates li {
+  border: 1px solid #ccc5b9;
+  border-radius: 6px;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.templates li:hover { background: #f0ede6; }
+.templates li span, .variants li span, #orders-list li span { font-size: 0.68rem; color: #888; }
+.variants li, #orders-list li {
+  border: 1px solid #ddd8d0;
+  border-radius: 6px;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+}
+.variants li:hover, #orders-list li:hover { background: #f0ede6; }
+li.empty { border: none !important; color: #999; font-size: 0.8rem; cursor: default !important; }
+
+.checkout form { display: flex; gap: 0.5rem; align-items: end; flex-wrap: wrap; margin: 0.5rem 0; }
+.checkout label { display: flex; flex-direction: column; font-size: 0.8rem; gap: 0.2rem; }
+.checkout input, .checkout select { padding: 0.35rem; border: 1px solid #ccc5b9; border-radius: 4px; }
+.checkout button { padding: 0.45rem 0.9rem; border: 1px solid #9dc9a5; border-radius: 4px; background: #e6f4ea; cursor: pointer; }
+.checkout p.hint { margin: 0.2rem 0; }
+.checkout code { background: #f0ede6; padding: 0 0.25rem; border-radius: 3px; font-size: 0.9em; }
+#orders-list { flex-direction: column; }
+
 .playground {
   background: #eef4ff;
   border: 1px solid #b9c9e8;

@@ -1,23 +1,13 @@
 import './styles.css';
-import { templates } from './atelier/templates';
 import { createGuard } from './redini/index';
 import { createDomPanel } from './redini/ui/dom-panel';
-
-/**
- * Day-1 target (SPIKE): prove the WebMCP pipeline end-to-end.
- * - feature-detect document.modelContext
- * - register one real tool (list_templates)
- * - render mock templates in the UI
- */
+import type { AuditEntry, PreviewInfo, Receipt, Transaction, UIAdapter, UndoEvent } from './redini/index';
+import type { FlyerDesign } from './atelier/store';
+import { AtelierStore } from './atelier/store';
+import { registerAtelierTools } from './atelier/tools';
+import { initAtelierUI } from './atelier/ui';
 
 const statusEl = document.getElementById('webmcp-status')!;
-const templateListEl = document.getElementById('template-list')!;
-
-// Demo mode: ?clean=1 hides human-only utilities (simulate buttons, spike zone)
-// so the ONLY way to mutate state is through WebMCP tools.
-if (new URLSearchParams(window.location.search).has('clean')) {
-  document.querySelectorAll('.playground-actions, .spike-zone').forEach((el) => el.remove());
-}
 
 function logEntry(text: string): void {
   const ul = document.getElementById('activity-log')!;
@@ -26,25 +16,89 @@ function logEntry(text: string): void {
   ul.prepend(li);
 }
 
-function logRegistrationError(err: unknown): void {
-  console.error('Tool registration failed:', err);
-  logEntry(`REGISTRATION ERROR: ${String(err)}`);
+// Demo mode: ?clean=1 hides human-only hints so the ONLY way for the agent to
+// mutate the design is the WebMCP tool path.
+if (new URLSearchParams(window.location.search).has('clean')) {
+  document.querySelectorAll('.spike-zone, .human-hint').forEach((el) => el.remove());
 }
 
+const store = new AtelierStore();
+let atelierUi: { setGhost: (g: FlyerDesign | null) => void } | null = null;
 
-function renderTemplates(): void {
-  templateListEl.innerHTML = '';
-  for (const t of templates) {
-    const li = document.createElement('li');
-    li.textContent = `${t.name} (${t.styleTags.join(', ')})`;
-    templateListEl.appendChild(li);
+function setGhost(ghost: FlyerDesign | null): void {
+  atelierUi?.setGhost(ghost);
+}
+
+/**
+ * Redini UI adapter: the DOM panel handles staging cards and the audit trail;
+ * the canvas ghost shows proposals BEFORE they happen.
+ */
+const panel = createDomPanel({
+  queueEl: document.getElementById('approval-queue')!,
+  logEl: document.getElementById('activity-log')!,
+  undoBtn: document.getElementById('undo-btn') as HTMLButtonElement,
+});
+
+const ui: UIAdapter & { bind?: (g: ReturnType<typeof createGuard>) => void } = {
+  onTransactionUpdated(tx: Transaction, preview: PreviewInfo | null): void {
+    panel.onTransactionUpdated(tx, preview);
+    const ghost = (preview?.diff as { ghostDesign?: FlyerDesign } | undefined)?.ghostDesign ?? null;
+    setGhost(tx.status === 'proposed' || tx.status === 'reviewing' ? ghost : null);
+  },
+  onReceipt(receipt: Receipt): void {
+    panel.onReceipt(receipt);
+  },
+  onUndo(ev: UndoEvent): void {
+    panel.onUndo(ev);
+    setGhost(null);
+  },
+  onAudit(entry: AuditEntry): void {
+    panel.onAudit(entry);
+  },
+  bind(g: ReturnType<typeof createGuard>): void {
+    panel.bind(g);
+  },
+};
+
+// document.modelContext is available synchronously: create the guard with it
+// right away, so every registration lands in the live model context exactly once.
+const mc = document.modelContext;
+const guard = createGuard({ ui, modelContext: mc ?? null });
+(window as unknown as { __guard: unknown }).__guard = guard; // console access for testing
+registerAtelierTools(guard, store);
+
+atelierUi = initAtelierUI(store, (templateId) => {
+  // Human direct action: it still flows through a transaction (dispatch +
+  // immediate commit), so the audit trail records everything and pending agent
+  // proposals correctly go stale.
+  const p = guard.dispatch('apply_template', { templateId }) as Promise<unknown>;
+  const txId = guard.getTransactions().at(-1)!.id;
+  p.then((o) => logEntry(`human action: ${JSON.stringify(o)}`)).catch(() => {});
+  guard.commit(txId).catch((e: unknown) => logEntry(e instanceof Error ? e.message : String(e)));
+});
+
+// Declarative checkout (spec-native staging): the agent fills the form,
+// the human reviews and submits — always. No toolautosubmit.
+const checkoutForm = document.getElementById('checkout-form') as HTMLFormElement | null;
+checkoutForm?.addEventListener('submit', (e) => {
+  const ev = e as SubmitEvent & { agentInvoked?: boolean; respondWith?: (p: Promise<unknown>) => void };
+  e.preventDefault(); // the demo never navigates
+  const data = new FormData(checkoutForm);
+  const order = store.addOrder(Number(data.get('copies')), String(data.get('pageSize')));
+  logEntry(`order placed via checkout form: ${order.id} (${order.copies}×${order.pageSize})`);
+  if (ev.agentInvoked) {
+    ev.respondWith?.(
+      Promise.resolve({
+        status: 'ordered',
+        orderNumber: order.id,
+        copies: order.copies,
+        pageSize: order.pageSize,
+      }),
+    );
   }
-}
+});
 
-async function bootstrap(): Promise<void> {
-  renderTemplates();
-
-  const mc = document.modelContext;
+void (async (): Promise<void> => {
   if (!mc) {
     statusEl.textContent = 'WebMCP not available in this browser';
     statusEl.classList.add('ko');
@@ -52,213 +106,10 @@ async function bootstrap(): Promise<void> {
   }
 
   statusEl.textContent = 'WebMCP available';
-  statusEl.classList.add('ok');
 
-  // ---- Redini guard: transactional layer over document.modelContext ----
-  const guard = createGuard({
-    ui: createDomPanel({
-      queueEl: document.getElementById('approval-queue')!,
-      logEl: document.getElementById('activity-log')!,
-      undoBtn: document.getElementById('undo-btn') as HTMLButtonElement,
-    }),
-    modelContext: mc,
-  });
-  (window as unknown as { __guard: unknown }).__guard = guard; // console access for testing
-
-  // Safe tool (read-only): executes immediately.
-  guard.registerSafeTool({
-    name: 'list_templates',
-    description:
-      'Lists the available flyer templates. Returns id, name and style tags for each template. Read-only.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        style: {
-          type: 'string',
-          description: 'Optional style tag to filter templates by (e.g. "spring", "minimal", "dark").',
-        },
-      },
-    },
-    annotations: { readOnlyHint: true },
-    execute: (input: Record<string, unknown>) => {
-      const style = typeof input.style === 'string' ? input.style.toLowerCase() : undefined;
-      const list = style
-        ? templates.filter((t) => t.styleTags.some((tag) => tag.includes(style)))
-        : templates;
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({
-              templates: list.map((t) => ({ id: t.id, name: t.name, styleTags: t.styleTags })),
-            }),
-          },
-        ],
-      };
-    },
-  });
-
-  // ---- Playground fixture (domain-agnostic counter) ----
-  let count = 0;
-  const counterEl = document.getElementById('counter-value')!;
-  const renderCount = (): void => {
-    counterEl.textContent = String(count);
-  };
-
-  guard.registerTransactionalTool({
-    name: 'set_count',
-    description:
-      'Proposes a new value for the demo counter. The human inspects, edits or commits the proposal — nothing changes until they commit.',
-    inputSchema: {
-      type: 'object',
-      properties: { count: { type: 'number', description: 'New counter value' } },
-      required: ['count'],
-    },
-    preview: (input) => ({ summary: `counter → ${String(input.count)}`, diff: { from: count, to: input.count } }),
-    execute: (input) => {
-      count = input.count as number;
-      renderCount();
-      return { count };
-    },
-    snapshot: () => count,
-    restore: (s) => {
-      count = s as number;
-      renderCount();
-    },
-  });
-
-  const proposeBtn = (id: string, value: number): void => {
-    document.getElementById(id)?.addEventListener('click', () => {
-      guard
-        .dispatch('set_count', { count: value })
-        .then((o) => logEntry(`agent outcome: ${JSON.stringify(o)}`))
-        .catch((e: unknown) => logEntry(`dispatch error: ${String(e)}`));
-    });
-  };
-  proposeBtn('propose-42', 42);
-  proposeBtn('propose-7', 7);
-  renderCount();
-
-  // ---- SPIKE TEST 2: tool resolved manually from the console ----
-  let slowResolve: (v: unknown) => void = () => {};
-  (window as unknown as { resolveSlow: (v: unknown) => void }).resolveSlow = (v) => slowResolve(v);
-
-  void mc
-    .registerTool({
-      name: 'slow_tool',
-      description:
-        'Diagnostic tool: it stays pending until the user resolves it from the page (window.resolveSlow). Call it only if the user asks explicitly.',
-      inputSchema: { type: 'object', properties: {} },
-      execute: async () => {
-        const started = Date.now();
-        const result = await new Promise((res) => {
-          slowResolve = res;
-        });
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `slow_tool resolved after ${Math.round((Date.now() - started) / 1000)}s with: ${JSON.stringify(result)}`,
-            },
-          ],
-        };
-      },
-    })
-    .catch(logRegistrationError);
-
-  // ---- SPIKE TESTS 3+4: declarative form with respondWith ----
-  const testForm = document.getElementById('test-form') as HTMLFormElement | null;
-  testForm?.addEventListener('submit', (e) => {
-    const ev = e as SubmitEvent & { agentInvoked?: boolean; respondWith?: (p: Promise<unknown>) => void };
-    logEntry(`test-form submit — agentInvoked: ${ev.agentInvoked === true}`);
-    e.preventDefault(); // spike: never navigate
-    if (ev.agentInvoked) {
-      const data = new FormData(testForm);
-      ev.respondWith?.(
-        Promise.resolve({
-          status: 'booked',
-          guest: data.get('guest_name'),
-          people: data.get('people'),
-        }),
-      );
-      logEntry(`respondWith sent: booked for ${String(data.get('guest_name'))}`);
-    }
-  });
-
-  // ---- SPIKE TEST 5: dynamic tool registration ----
-  let note = '';
-  let noteCounter = 0;
-
-  void mc
-    .registerTool({
-      name: 'add_note',
-      description:
-        'Adds a note to the page. It also registers a read_note tool the agent can call to read the note back.',
-      inputSchema: {
-        type: 'object',
-        properties: { text: { type: 'string', description: 'The note text' } },
-        required: ['text'],
-      },
-      execute: async (input: Record<string, unknown>) => {
-        note = String(input.text ?? '');
-        noteCounter += 1;
-        await mc.registerTool({
-          name: `read_note_${noteCounter}`,
-          description: `Returns the text of note number ${noteCounter}. Read-only.`,
-          inputSchema: { type: 'object', properties: {} },
-          annotations: { readOnlyHint: true },
-          execute: async () => ({
-            content: [{ type: 'text' as const, text: `note ${noteCounter}: ${note}` }],
-          }),
-        });
-        return {
-          content: [
-            { type: 'text' as const, text: `Note saved. A tool named read_note_${noteCounter} is now available to read it.` },
-          ],
-        };
-      },
-    })
-    .catch(logRegistrationError);
-
-  // ---- SPIKE TEST 6: unregistration via AbortController ----
-  const tempController = new AbortController();
-
-  void mc
-    .registerTool(
-      {
-        name: 'temp_echo',
-        description: 'Echoes its input. Temporary tool, used to test unregistration.',
-        inputSchema: {
-          type: 'object',
-          properties: { message: { type: 'string', description: 'Text to echo' } },
-          required: ['message'],
-        },
-        execute: async (input: Record<string, unknown>) => ({
-          content: [{ type: 'text' as const, text: `echo: ${String(input.message)}` }],
-        }),
-      },
-      { signal: tempController.signal },
-    )
-    .catch(logRegistrationError);
-
-  void mc
-    .registerTool({
-      name: 'dispose_temp',
-      description: 'Unregisters the temp_echo tool. Read-only.',
-      inputSchema: { type: 'object', properties: {} },
-      annotations: { readOnlyHint: true },
-      execute: async () => {
-        tempController.abort();
-        return { content: [{ type: 'text' as const, text: 'temp_echo has been unregistered' }] };
-      },
-    })
-    .catch(logRegistrationError);
-
-  // Diagnostics: count ALL registered tools (run last, visible without devtools).
+  // Diagnostics: full registered-tool count, visible without devtools.
   await new Promise((r) => setTimeout(r, 200));
   const registered = await mc.getTools().catch(() => [] as { name: string }[]);
   statusEl.textContent = `WebMCP available · ${registered.length} tools`;
   logEntry(`tools registered: ${registered.map((t) => t.name).join(', ') || 'NONE'}`);
-}
-
-void bootstrap();
+})();

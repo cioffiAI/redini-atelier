@@ -30,13 +30,15 @@ Ipotesi: ~8-10 ore/giorno di lavoro effettivo. Ogni giorno ha un criterio di "fa
 
 **Fatto**: le quattro vie (commit / modifica+commit / rifiuto / rollback) producono receipt coerenti nell'audit trail — verificato in unit test E nel browser.
 
-### Giorno 3 — 31/08: Atelier (l'app)
-- [ ] Canvas flyer con i 6 campi + 4 template mock
-- [ ] Tutti i tool imperativi registrati come transazioni (varianti dinamiche incluse)
-- [ ] Checkout dichiarativo (VERIFICATO nello spike: senza `toolautosubmit` il form resta pending per la revisione umana — è una transazione nativa)
-- [ ] Preview/diff prima/dopo nella card di staging
-- [ ] Caso avversario: `get_vendor_content` con testo iniettato → proposta indesiderata → decline
-- [ ] UI redini integrata e presentabile
+### Giorno 3 — 31/08: Atelier (l'app) — COMPLETATO
+- [x] Canvas flyer completo (titolo, sottotitolo, data, colori, font, clipart) + 4 template mock con note vendor
+- [x] 8 tool registrati via Redini: 4 safe (list_templates, get_current_design, filter_templates, get_vendor_content) + 4 transazionali (edit_flyer, apply_template, create_variant, order_prints)
+- [x] Checkout dichiarativo spec-native (order_prints_form, senza toolautosubmit → submit sempre umano, respondWith all'agente)
+- [x] Ghost preview: le proposte in staging si vedono sul canvas PRIMA di accadere (differenziatore visivo)
+- [x] Varianti dinamiche: create_variant registra select_variant_N; undo → abort controller → deregistrazione (coerente anche senza model context)
+- [x] Caso avversario: get_vendor_content (untrustedContentHint) con iniezione nel template evening-gala
+- [x] Azioni umane dirette (click template) passano anch'esse da transazioni (dispatch+commit immediato) → audit completo
+- [x] 22/22 test (14 core + 8 atelier) + e2e browser completo (scripts/atelier-e2e.mjs): staging→ghost→commit→undo→order→decline→audit ALL OK
 
 **Fatto quando**: flusso completo dimostrabile: template → modifiche approvate → varianti → checkout rivisto dall'utente.
 
