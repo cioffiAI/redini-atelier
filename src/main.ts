@@ -13,6 +13,12 @@ import { createDomPanel } from './redini/ui/dom-panel';
 const statusEl = document.getElementById('webmcp-status')!;
 const templateListEl = document.getElementById('template-list')!;
 
+// Demo mode: ?clean=1 hides human-only utilities (simulate buttons, spike zone)
+// so the ONLY way to mutate state is through WebMCP tools.
+if (new URLSearchParams(window.location.search).has('clean')) {
+  document.querySelectorAll('.playground-actions, .spike-zone').forEach((el) => el.remove());
+}
+
 function logEntry(text: string): void {
   const ul = document.getElementById('activity-log')!;
   const li = document.createElement('li');
