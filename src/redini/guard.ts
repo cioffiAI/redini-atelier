@@ -11,7 +11,6 @@ import type {
   Operation,
   PreviewInfo,
   ReceiptRow,
-  RegisterToolRequest,
   SafeToolDefinition,
   UIAdapter,
   UndoEvent,
@@ -28,13 +27,13 @@ interface InternalOp {
   id: string;
   kind: string;
   label: string;
+  originalLabel: string;
   params: Record<string, unknown>;
   originalParams: Record<string, unknown>;
   included: boolean;
   amended: boolean;
   /** 'intended' until commit; 'applied' | 'failed' after. Skipped is derived from `included`. */
   status: 'intended' | 'applied' | 'failed';
-  inverse?: Operation;
 }
 
 interface InternalChangeSet {
@@ -71,7 +70,15 @@ export interface GuardOptions {
   idFactory?: () => string;
 }
 
-const DECIDED_STATUSES: ChangeSet['status'][] = ['committed', 'declined', 'undone', 'stale', 'failed'];
+const DECIDED_STATUSES: ChangeSet['status'][] = [
+  'committed',
+  'declined',
+  'cancelled',
+  'undone',
+  'stale',
+  'failed',
+  'undo_failed',
+];
 
 function defaultInputSchema(kinds: string[]): object {
   return {
@@ -104,8 +111,25 @@ function defaultInputSchema(kinds: string[]): object {
   };
 }
 
-function toMcpResult(outcome: AgentOutcome): { content: Array<{ type: 'text'; text: string }> } {
-  return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };
+function toMcpResult(outcome: AgentOutcome): AgentOutcome {
+  // FIX I: direct structured serialization — the execute callback returns this
+  // object as-is; no `{content:[{type:'text',...}]}` envelope.
+  return outcome;
+}
+
+function executeFailedResult(changeSetId: string | null, e: unknown): AgentOutcome {
+  return {
+    status: 'execute_failed',
+    changeSetId,
+    appliedCount: 0,
+    amendedCount: 0,
+    skippedCount: 0,
+    undoAvailable: false,
+    error: {
+      code: e instanceof RediniError ? e.code : 'EXECUTION_FAILED',
+      message: e instanceof Error ? e.message : String(e),
+    },
+  };
 }
 
 export class RediniGuard {
@@ -129,10 +153,6 @@ export class RediniGuard {
     opts.ui.bind?.(this);
   }
 
-  attachModelContext(mc: ModelContextLike): void {
-    this.mcp = mc;
-  }
-
   registerSafeTool(def: SafeToolDefinition, options?: { signal?: AbortSignal }): void {
     this.registrations.set(def.name, { kind: 'safe', def });
     this.mcp?.registerTool(
@@ -142,7 +162,10 @@ export class RediniGuard {
         description: def.description,
         inputSchema: def.inputSchema,
         annotations: def.annotations ?? { readOnlyHint: true },
-        execute: (input, execOptions) => def.execute(input, execOptions),
+        execute: (input, execOptions) =>
+          // The browser may invoke execute(input) with a single argument —
+          // normalize the context so the tool definition always sees {signal}.
+          def.execute(input, execOptions ?? { signal: new AbortController().signal }),
       },
       options,
     );
@@ -166,17 +189,23 @@ export class RediniGuard {
         description: def.description,
         inputSchema: def.inputSchema ?? defaultInputSchema(def.kinds),
         annotations: { readOnlyHint: false },
-        execute: async (input, execOptions) =>
-          toMcpResult((await this.dispatch(def.name, input, execOptions.signal)) as AgentOutcome),
+        execute: async (input, execOptions) => {
+          // FIX I: the changeset execute callback NEVER rejects. Pre-staging
+          // validation failures resolve with status 'execute_failed' instead of
+          // throwing; mid-commit failures settle the inner promise with the
+          // same structured error. EMPTY_CHANGESET never reaches this path — it
+          // is a human-UI error and the agent promise stays pending.
+          try {
+            return toMcpResult(
+              (await this.dispatch(def.name, input, execOptions?.signal)) as AgentOutcome,
+            );
+          } catch (e) {
+            return executeFailedResult(null, e);
+          }
+        },
       },
       options,
     );
-  }
-
-  register(def: RegisterToolRequest): void {
-    const { mode, ...rest } = def;
-    if (mode === 'changeset') this.registerChangeSetTool(rest as ChangeSetToolDefinition);
-    else this.registerSafeTool(rest as SafeToolDefinition);
   }
 
   /**
@@ -198,13 +227,23 @@ export class RediniGuard {
     }
 
     const def = reg.def as ChangeSetToolDefinition;
-    const intent = typeof input.intent === 'string' && input.intent.trim() ? input.intent : '(no intent given)';
-    const rawOps = Array.isArray(input.operations) ? (input.operations as Array<Record<string, unknown>>) : [];
+    // Schema parity: the inputSchema marks `intent` as REQUIRED — no default.
+    const intent = typeof input?.intent === 'string' && input.intent.trim() ? input.intent : null;
+    if (!intent) {
+      throw new RediniError('INVALID_OPERATION', 'the ChangeSet needs an "intent" string');
+    }
+    const rawOps = Array.isArray(input?.operations) ? (input.operations as Array<Record<string, unknown>>) : [];
     if (rawOps.length === 0) {
       throw new RediniError('INVALID_OPERATION', 'the ChangeSet has no operations');
     }
 
     const ops: InternalOp[] = rawOps.map((raw, i) => {
+      // Schema parity: each operation object is additionalProperties:false —
+      // reject keys other than kind/params instead of silently ignoring them.
+      const extraKey = Object.keys(raw ?? {}).find((k) => k !== 'kind' && k !== 'params');
+      if (extraKey !== undefined) {
+        throw new RediniError('INVALID_OPERATION', `operation ${i + 1}: unknown key "${extraKey}"`);
+      }
       const kind = String(raw?.kind ?? '');
       const params = ((raw?.params ?? {}) as Record<string, unknown>) ?? {};
       if (!def.kinds.includes(kind)) {
@@ -214,12 +253,14 @@ export class RediniGuard {
       if (validationError) {
         throw new RediniError('INVALID_OPERATION', `operation ${i + 1}: ${validationError}`);
       }
+      const label = def.describeOperation?.({ kind, params }) ?? `${kind} ${JSON.stringify(params)}`;
       return {
         id: `op-${i + 1}`,
         kind,
         params: structuredClone(params),
         originalParams: structuredClone(params),
-        label: def.describeOperation?.({ kind, params }) ?? `${kind} ${JSON.stringify(params)}`,
+        label,
+        originalLabel: label, // the agent's original description — immutable, shown in receipts
         included: true,
         amended: false,
         status: 'intended' as const,
@@ -247,9 +288,20 @@ export class RediniGuard {
       cs.resolve = resolve;
       const onAbort = (): void => {
         if (cs.settled || !(cs.status === 'proposed' || cs.status === 'reviewing')) return;
-        cs.status = 'declined';
+        // FIX D: the human (or host) aborted the invocation — the ChangeSet is
+        // visibly 'cancelled', UI subscribers are notified, the agent promise
+        // settles exactly once.
+        cs.status = 'cancelled';
         this.audit('cancelled', cs, { reason: 'agent_aborted' });
-        this.settle(cs, { status: 'cancelled', txId: cs.id });
+        this.emitUpdate(cs);
+        this.settle(cs, {
+          status: 'cancelled',
+          changeSetId: cs.id,
+          appliedCount: 0,
+          amendedCount: 0,
+          skippedCount: 0,
+          undoAvailable: false,
+        });
       };
       if (signal.aborted) onAbort();
       else signal.addEventListener('abort', onAbort, { once: true });
@@ -270,7 +322,15 @@ export class RediniGuard {
     return this.publicCs(cs);
   }
 
-  /** Amend a single operation's parameters before commit. The original is preserved for the receipt. */
+  /**
+   * FIX A+B: VALIDATED amendment with recomputed description.
+   * - rejects non-plain-object params with INVALID_AMENDMENT;
+   * - runs the registered tool's `validate` on {kind, params}; a string error
+   *   throws INVALID_AMENDMENT and leaves the operation UNMUTATED;
+   * - on success: params = structuredClone(params) and label is RECOMPUTED via
+   *   describeOperation with the NEW params;
+   * - originalParams (and originalLabel) stay immutable forever.
+   */
   amendOperation(
     csId: string,
     opId: string,
@@ -281,8 +341,18 @@ export class RediniGuard {
     if (DECIDED_STATUSES.includes(cs.status)) {
       throw new RediniError('ALREADY_DECIDED', `ChangeSet ${csId} is already ${cs.status}`);
     }
+    if (typeof params !== 'object' || params === null || Array.isArray(params)) {
+      throw new RediniError('INVALID_AMENDMENT', `operation ${opId}: amendment params must be a plain object`);
+    }
+    const validationError = this.changesetDef(cs.tool).validate?.({ kind: op.kind, params });
+    if (validationError) {
+      throw new RediniError('INVALID_AMENDMENT', `operation ${opId}: ${validationError}`);
+    }
     op.params = structuredClone(params);
     op.amended = !deepEqual(params, op.originalParams);
+    op.label =
+      this.changesetDef(cs.tool).describeOperation?.({ kind: op.kind, params }) ??
+      `${op.kind} ${JSON.stringify(params)}`;
     cs.status = 'reviewing';
     this.audit('reviewing', cs, { op: opId, amended: op.amended });
     this.emitUpdate(cs);
@@ -293,6 +363,16 @@ export class RediniGuard {
    * Human decision: atomic commit of the included subset.
    * Each applied operation yields its inverse; if any apply throws, the already
    * applied ones are rolled back through their inverses (all-or-nothing).
+   *
+   * FIX F: rollback reporting is TRUTHFUL — `rolledBack` counts actual
+   * compensation successes, and a failed compensation surfaces ROLLBACK_FAILED
+   * with structured detail.
+   *
+   * FIX I: on failure the agent promise settles with status 'execute_failed'
+   * and the typed error code (EXECUTION_FAILED or ROLLBACK_FAILED); the typed
+   * RediniError is rethrown for the human UI caller. EMPTY_CHANGESET is the
+   * ONLY committing error that does NOT settle the agent promise — it is a
+   * human-UI error and the ChangeSet stays 'reviewing'.
    */
   async commitChangeSet(csId: string): Promise<ChangeSetReceipt> {
     const cs = this.requireCs(csId);
@@ -309,14 +389,20 @@ export class RediniGuard {
       this.emitUpdate(cs);
       this.settle(cs, {
         status: 'stale_transaction',
-        txId: cs.id,
-        message: 'State changed since this ChangeSet was proposed. Re-propose with fresh data.',
+        changeSetId: cs.id,
+        appliedCount: 0,
+        amendedCount: 0,
+        skippedCount: 0,
+        undoAvailable: false,
+        error: { code: 'STALE_TRANSACTION', message: 'State changed since this ChangeSet was proposed. Re-propose with fresh data.' },
       });
       throw new RediniError('STALE_TRANSACTION', `ChangeSet ${csId} was proposed on a previous state`);
     }
 
     const included = cs.ops.filter((o) => o.included);
     if (included.length === 0) {
+      // Human-UI error only: the agent promise stays pending, the ChangeSet
+      // stays 'reviewing' so the human can re-include operations.
       throw new RediniError('EMPTY_CHANGESET', 'every operation was skipped: nothing to commit');
     }
 
@@ -329,29 +415,71 @@ export class RediniGuard {
           id: op.id,
           kind: op.kind,
           label: op.label,
+          originalLabel: op.originalLabel,
           params: structuredClone(op.params),
         });
         inverses.push(inverse);
         op.status = 'applied';
-        op.inverse = inverse;
         appliedIds.push(op.id);
       }
     } catch (e) {
-      // Atomic: undo what was already applied, in reverse order.
+      // Atomic: compensate what was already applied, in reverse order, tracking
+      // each success. If every compensation succeeds the commit failed cleanly
+      // (EXECUTION_FAILED). If a compensation itself fails we surface
+      // ROLLBACK_FAILED with the exact partial state — no false rolledBack count.
+      const compensated: string[] = [];
+      let rollbackFailure: { id: string; cause: unknown } | null = null;
       for (const inv of [...inverses].reverse()) {
         try {
           def.runtime.apply(inv);
-        } catch {
-          /* best effort rollback */
+          compensated.push(inv.id);
+        } catch (cause) {
+          rollbackFailure = { id: inv.id, cause };
+          break;
         }
       }
       for (const op of included) op.status = 'failed';
       const message = e instanceof Error ? e.message : String(e);
       cs.status = 'failed';
-      this.audit('failed', cs, { error: message, rolledBack: inverses.length });
       this.emitUpdate(cs);
-      this.settle(cs, { status: 'execute_failed', txId: cs.id, error: message });
-      throw e instanceof Error ? e : new Error(message);
+      if (rollbackFailure) {
+        this.audit('failed', cs, {
+          error: message,
+          rolledBack: compensated.length,
+          rollbackFailed: true,
+          failedCompensation: rollbackFailure.id,
+        });
+        this.settle(cs, {
+          status: 'execute_failed',
+          changeSetId: cs.id,
+          appliedCount: 0,
+          amendedCount: 0,
+          skippedCount: 0,
+          undoAvailable: false,
+          error: { code: 'ROLLBACK_FAILED', message },
+        });
+        throw new RediniError(
+          'ROLLBACK_FAILED',
+          `ChangeSet ${csId} failed and its rollback is incomplete`,
+          rollbackFailure.cause,
+          {
+            appliedOperations: appliedIds,
+            compensatedOperations: compensated,
+            failedCompensation: rollbackFailure.id,
+          },
+        );
+      }
+      this.audit('failed', cs, { error: message, rolledBack: compensated.length });
+      this.settle(cs, {
+        status: 'execute_failed',
+        changeSetId: cs.id,
+        appliedCount: 0,
+        amendedCount: 0,
+        skippedCount: 0,
+        undoAvailable: false,
+        error: { code: 'EXECUTION_FAILED', message },
+      });
+      throw new RediniError('EXECUTION_FAILED', message, e);
     }
 
     this.mutationCounter += 1;
@@ -360,19 +488,40 @@ export class RediniGuard {
     const undoToken = this.nextId();
     const stateVersionAfter = def.getStateVersion?.() ?? this.mutationCounter;
 
+    const originalRow = (o: InternalOp): ReceiptRow => ({
+      id: o.id,
+      kind: o.kind,
+      label: o.originalLabel,
+      params: structuredClone(o.originalParams),
+    });
+    const currentRow = (o: InternalOp): ReceiptRow => ({
+      id: o.id,
+      kind: o.kind,
+      label: o.label,
+      params: structuredClone(o.params),
+    });
+    const amendedRow = (o: InternalOp): ReceiptRow => ({
+      id: o.id,
+      kind: o.kind,
+      label: o.label,
+      originalLabel: o.originalLabel,
+      params: structuredClone(o.params),
+      originalParams: structuredClone(o.originalParams),
+    });
+
     const receipt: ChangeSetReceipt = {
       transactionId: cs.id,
+      changeSetId: cs.id,
       tool: cs.tool,
       intent: cs.intent,
-      intended: cs.ops.map((o) => this.row(o, o.originalParams)),
-      amended: cs.ops
-        .filter((o) => o.amended && o.status === 'applied')
-        .map((o) => this.row(o, o.params)),
-      skippedByHuman: cs.ops.filter((o) => !o.included).map((o) => this.row(o, o.params)),
-      applied: appliedIds,
+      intended: cs.ops.map((o) => originalRow(o)),
+      amended: cs.ops.filter((o) => o.amended && o.status === 'applied').map((o) => amendedRow(o)),
+      skippedByHuman: cs.ops.filter((o) => !o.included).map((o) => currentRow(o)),
+      applied: included.map((o) => currentRow(o)),
       stateVersionBefore,
       stateVersionAfter,
       undoToken,
+      proposedAt: cs.proposedAt,
       committedAt: cs.committedAt,
     };
     this.undoRecords.set(undoToken, {
@@ -393,12 +542,11 @@ export class RediniGuard {
     this.emitUpdate(cs);
     this.settle(cs, {
       status: 'committed',
-      txId: cs.id,
-      intent: cs.intent,
+      changeSetId: cs.id,
       appliedCount: appliedIds.length,
       amendedCount: receipt.amended.length,
       skippedCount: receipt.skippedByHuman.length,
-      receipt,
+      undoAvailable: true,
     });
     return receipt;
   }
@@ -412,25 +560,73 @@ export class RediniGuard {
     cs.status = 'declined';
     this.audit('declined', cs, reason ? { reason } : undefined);
     this.emitUpdate(cs);
-    this.settle(cs, { status: 'declined_by_user', txId: cs.id, reason });
+    this.settle(cs, {
+      status: 'declined_by_user',
+      changeSetId: cs.id,
+      appliedCount: 0,
+      amendedCount: 0,
+      skippedCount: 0,
+      undoAvailable: false,
+    });
     return this.publicCs(cs);
   }
 
-  /** Deterministic rollback: replays the stored inverse operations, last-applied first. */
+  /**
+   * Deterministic rollback: replays the stored inverse operations, last-applied first.
+   *
+   * FIX E — undo token lifecycle: the token is marked consumed ONLY after ALL
+   * inverses succeeded. Inverses are expected to be set-semantics (idempotent) —
+   * Atelier's are (each inverse sets a concrete value), so retrying a failed undo
+   * with the same token is safe. On failure the token stays usable, the ChangeSet
+   * becomes 'undo_failed', an 'undo_failed' audit entry with structured detail is
+   * emitted, and a typed UNDO_FAILED RediniError is thrown.
+   */
   async undo(undoToken: string): Promise<UndoEvent> {
     const record = this.undoRecords.get(undoToken);
     if (!record) throw new RediniError('UNKNOWN_TOKEN', `no undo record for token "${undoToken}"`);
     if (record.consumed) throw new RediniError('ALREADY_UNDONE', `token ${undoToken} was already used`);
-    record.consumed = true;
 
     const def = this.changesetDef(record.tool);
-    for (const inv of record.inverses) {
-      def.runtime.apply(inv);
+    // Truthful progress: `done` tracks the inverses ACTUALLY replayed before the
+    // failure — the audit must never report the whole list or its total length.
+    const done: string[] = [];
+    try {
+      for (const inv of record.inverses) {
+        def.runtime.apply(inv);
+        done.push(inv.id);
+      }
+    } catch (e) {
+      const failingInverseId = record.inverses[done.length]?.id ?? 'unknown';
+      const cause = e instanceof Error ? e.message : String(e);
+      const detail = {
+        undoToken,
+        attempted: [...done, failingInverseId],
+        remaining: record.inverses.slice(done.length + 1).map((inv) => inv.id),
+        cause,
+      };
+      const cs = this.changeSets.get(record.csId);
+      if (cs) cs.status = 'undo_failed';
+      this.ui.onAudit({
+        kind: 'undo_failed',
+        txId: record.csId,
+        tool: record.tool,
+        at: this.now(),
+        detail,
+      });
+      if (cs) this.emitUpdate(cs);
+      throw new RediniError(
+        'UNDO_FAILED',
+        `undo of ${record.csId} failed after ${done.length} successful compensations`,
+        e,
+        detail,
+      );
     }
+    // Only now — after every inverse succeeded — is the token consumed.
+    record.consumed = true;
     this.mutationCounter += 1;
 
     const cs = this.changeSets.get(record.csId);
-    if (cs && cs.status === 'committed') cs.status = 'undone';
+    if (cs && (cs.status === 'committed' || cs.status === 'undo_failed')) cs.status = 'undone';
     const ev: UndoEvent = {
       type: 'undo',
       transactionId: record.csId,
@@ -475,15 +671,12 @@ export class RediniGuard {
     return reg.def as ChangeSetToolDefinition;
   }
 
-  private row(op: InternalOp, params: Record<string, unknown>): ReceiptRow {
-    return { id: op.id, label: op.label, params: structuredClone(params) };
-  }
-
   private publicCs(cs: InternalChangeSet): ChangeSet {
     const operations: ChangeSetOperation[] = cs.ops.map((o) => ({
       id: o.id,
       kind: o.kind,
       label: o.label,
+      originalLabel: o.originalLabel,
       params: structuredClone(o.params),
       originalParams: structuredClone(o.originalParams),
       included: o.included,
@@ -513,7 +706,7 @@ export class RediniGuard {
     const def = this.changesetDef(cs.tool);
     const included = cs.ops
       .filter((o) => o.included)
-      .map((o) => ({ kind: o.kind, params: o.params }));
+      .map((o) => ({ kind: o.kind, params: structuredClone(o.params) }));
     const simulated = def.runtime.simulate(included);
     const amendedCount = cs.ops.filter((o) => o.amended && o.included).length;
     const skippedCount = cs.ops.filter((o) => !o.included).length;

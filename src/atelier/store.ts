@@ -2,9 +2,9 @@
  * Atelier domain store v2 — pure logic, no DOM.
  *
  * The mutation vocabulary is intentionally limited and every mutation has an
- * exact inverse: setText, setFill, setFont, move, resize (+ addVariant /
- * removeVariant for the variant catalogue). That is what makes Redini's undo
- * deterministic instead of snapshot-based.
+ * exact inverse: setText, setFill, setFont, move, resize. That is what makes
+ * Redini's undo deterministic instead of snapshot-based. EVERY mutation bumps
+ * `version` (the explicit stale guard) — there is no mutation without a bump.
  */
 
 export interface LogoState {
@@ -27,15 +27,7 @@ export interface FlyerDesign {
 export type TextField = 'title' | 'subtitle' | 'dateLine';
 export type FillTarget = 'background' | 'text';
 
-export interface Variant {
-  id: string;
-  n: number;
-  name: string;
-  design: FlyerDesign;
-  controller: AbortController;
-}
-
-export type StoreEventType = 'design' | 'variants';
+export type StoreEventType = 'design';
 
 export type OpInput = { kind: string; params: Record<string, unknown> };
 
@@ -56,10 +48,8 @@ const DEFAULT_DESIGN: FlyerDesign = {
 
 export class AtelierStore {
   design: FlyerDesign = structuredClone(DEFAULT_DESIGN);
-  variants: Variant[] = [];
   /** Bumped by EVERY mutation — feeds Redini's explicit stale guard. */
   version = 0;
-  variantCounter = 0;
 
   private listeners = new Set<(type: StoreEventType) => void>();
 
@@ -76,7 +66,7 @@ export class AtelierStore {
     this.version += 1;
   }
 
-  // ---------- mutation vocabulary (each has an exact inverse) ----------
+  // ---------- mutation vocabulary (each has an exact inverse, each bumps) ----------
 
   setText(field: TextField, value: string): void {
     if (!['title', 'subtitle', 'dateLine'].includes(field)) {
@@ -113,38 +103,6 @@ export class AtelierStore {
     this.emit('design');
   }
 
-  createVariant(name?: string): Variant {
-    this.variantCounter += 1;
-    const v: Variant = {
-      id: `variant-${this.variantCounter}`,
-      n: this.variantCounter,
-      name: typeof name === 'string' && name.trim() ? name.trim() : `Variant ${this.variantCounter}`,
-      design: structuredClone(this.design),
-      controller: new AbortController(),
-    };
-    this.variants.push(v);
-    this.bump();
-    this.emit('variants');
-    return v;
-  }
-
-  removeVariant(id: string): void {
-    const v = this.variants.find((v) => v.id === id);
-    if (!v) throw new Error(`unknown variant "${id}"`);
-    v.controller.abort(); // unregisters its dynamic tool, if any
-    this.variants = this.variants.filter((x) => x.id !== id);
-    this.bump();
-    this.emit('variants');
-  }
-
-  selectVariant(id: string): FlyerDesign | null {
-    const v = this.variants.find((v) => v.id === id);
-    if (!v) return null;
-    this.design = structuredClone(v.design);
-    this.emit('design');
-    return this.design;
-  }
-
   // ---------- preview (no mutation) ----------
 
   /** Applies a subset of operations to a throw-away copy: the ghost. */
@@ -172,10 +130,6 @@ export class AtelierStore {
           break;
         case 'resize':
           if (typeof p.size === 'number') d.logo = { ...d.logo, size: p.size };
-          break;
-        case 'addVariant':
-        case 'removeVariant':
-          // no visual change on the master canvas
           break;
         default:
           break;

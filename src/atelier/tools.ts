@@ -5,12 +5,22 @@ import { AtelierStore, CANVAS_H, CANVAS_W, FONT_OPTIONS } from './store';
 
 /**
  * Atelier's operation vocabulary — intentionally limited, each with an exact inverse:
- *   setText / setFill / setFont / move / resize / addVariant (inverse: removeVariant)
+ *   setText / setFill / setFont / move / resize
+ * The WebMCP tool surface is EXACTLY 5 tools (no dynamic tools are ever registered).
  */
-export const OP_KINDS = ['setText', 'setFill', 'setFont', 'move', 'resize', 'addVariant'];
+export const OP_KINDS = ['setText', 'setFill', 'setFont', 'move', 'resize'];
 
 const TEXT_FIELDS = ['title', 'subtitle', 'dateLine'];
 const FILL_TARGETS = ['background', 'text'];
+
+/** Params allowed per kind — the validator rejects unknown extra keys (schema parity). */
+const ALLOWED_PARAM_KEYS: Record<string, string[]> = {
+  setText: ['field', 'value'],
+  setFill: ['target', 'value'],
+  setFont: ['value'],
+  move: ['x', 'y'],
+  resize: ['size'],
+};
 
 function buildOpLabel(op: { kind: string; params: Record<string, unknown> }): string {
   const p = op.params;
@@ -25,17 +35,24 @@ function buildOpLabel(op: { kind: string; params: Record<string, unknown> }): st
       return `logo → (${String(p.x)}, ${String(p.y)})`;
     case 'resize':
       return `logo size → ${String(p.size)}`;
-    case 'addVariant':
-      return `create variant "${String(p.name ?? 'unnamed')}"`;
-    case 'removeVariant':
-      return `remove variant ${String(p.variantId ?? '')}`;
     default:
       return `${op.kind} ${JSON.stringify(p)}`;
   }
 }
 
+function rejectUnknownParams(kind: string, params: Record<string, unknown>): string | null {
+  const allowed = ALLOWED_PARAM_KEYS[kind];
+  if (!allowed) return null;
+  for (const key of Object.keys(params)) {
+    if (!allowed.includes(key)) return `unknown parameter "${key}" for ${kind}`;
+  }
+  return null;
+}
+
 function validateOp(op: { kind: string; params: Record<string, unknown> }): string | null {
   const p = op.params;
+  const extra = rejectUnknownParams(op.kind, p);
+  if (extra) return extra;
   switch (op.kind) {
     case 'setText':
       if (!TEXT_FIELDS.includes(String(p.field))) return `unknown text field "${String(p.field)}"`;
@@ -43,35 +60,129 @@ function validateOp(op: { kind: string; params: Record<string, unknown> }): stri
       return null;
     case 'setFill':
       if (!FILL_TARGETS.includes(String(p.target))) return `unknown fill target "${String(p.target)}"`;
-      if (typeof p.value !== 'string' || !p.value.startsWith('#')) return 'fill must be a #rrggbb color';
+      if (typeof p.value !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(p.value)) {
+        return 'fill must be a #rrggbb color';
+      }
       return null;
     case 'setFont':
       if (!FONT_OPTIONS.includes(String(p.value))) return `unknown font "${String(p.value)}"`;
       return null;
     case 'move': {
-      const x = Number(p.x);
-      const y = Number(p.y);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return 'x and y must be numbers';
-      if (x < 0 || x > CANVAS_W || y < 0 || y > CANVAS_H) return `logo must stay within ${CANVAS_W}×${CANVAS_H}`;
+      // Validator parity: REAL numbers only — a string "40" must be rejected,
+      // not coerced (the schema says type: number).
+      if (
+        typeof p.x !== 'number' ||
+        typeof p.y !== 'number' ||
+        !Number.isFinite(p.x) ||
+        !Number.isFinite(p.y)
+      ) {
+        return 'x and y must be numbers';
+      }
+      if (p.x < 0 || p.x > CANVAS_W || p.y < 0 || p.y > CANVAS_H) return `logo must stay within ${CANVAS_W}×${CANVAS_H}`;
       return null;
     }
     case 'resize': {
-      const size = Number(p.size);
-      if (!Number.isFinite(size) || size < 16 || size > 200) return 'size must be between 16 and 200';
+      if (typeof p.size !== 'number' || !Number.isFinite(p.size)) return 'size must be a number';
+      if (p.size < 16 || p.size > 200) return 'size must be between 16 and 200';
       return null;
     }
-    case 'addVariant':
-      if (p.name !== undefined && typeof p.name !== 'string') return 'name must be a string';
-      return null;
-    case 'removeVariant':
-      if (typeof p.variantId !== 'string') return 'variantId must be a string';
-      return null;
     default:
       return `unknown operation kind "${op.kind}"`;
   }
 }
 
-export function createAtelierRuntime(guard: RediniGuard, store: AtelierStore): OperationRuntime {
+/** Strict per-kind params schema — mirrors validateOp exactly. */
+function paramsSchema(kind: string): object {
+  switch (kind) {
+    case 'setText':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['field', 'value'],
+        properties: {
+          field: { type: 'string', enum: TEXT_FIELDS },
+          value: { type: 'string' },
+        },
+      };
+    case 'setFill':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['target', 'value'],
+        properties: {
+          target: { type: 'string', enum: FILL_TARGETS },
+          value: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' },
+        },
+      };
+    case 'setFont':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['value'],
+        properties: {
+          value: { type: 'string', enum: FONT_OPTIONS },
+        },
+      };
+    case 'move':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['x', 'y'],
+        properties: {
+          x: { type: 'number', minimum: 0, maximum: CANVAS_W },
+          y: { type: 'number', minimum: 0, maximum: CANVAS_H },
+        },
+      };
+    case 'resize':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['size'],
+        properties: {
+          size: { type: 'number', minimum: 16, maximum: 200 },
+        },
+      };
+    default:
+      return { type: 'object', additionalProperties: false };
+  }
+}
+
+function opSchema(kind: string): object {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['kind', 'params'],
+    properties: {
+      kind: { type: 'string', enum: [kind] },
+      params: paramsSchema(kind),
+    },
+  };
+}
+
+/**
+ * The design_update inputSchema: strict, per-kind, no extra top-level keys.
+ * Redini uses it verbatim (instead of the loose generated default) for the
+ * WebMCP registration; def.validate keeps the same guarantees at dispatch.
+ */
+export const DESIGN_UPDATE_INPUT_SCHEMA: object = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['intent', 'operations'],
+  properties: {
+    intent: { type: 'string', description: 'One sentence: what this ChangeSet is trying to achieve for the user.' },
+    operations: {
+      type: 'array',
+      minItems: 1,
+      description:
+        'The individual operations to propose. The human can preview the result, amend parameters, skip operations and atomically commit the subset.',
+      items: {
+        oneOf: OP_KINDS.map((kind) => opSchema(kind)),
+      },
+    },
+  },
+};
+
+export function createAtelierRuntime(store: AtelierStore): OperationRuntime {
   return {
     /** Applies one operation to the real state and returns its exact inverse. */
     apply(op: Operation): Operation {
@@ -103,33 +214,6 @@ export function createAtelierRuntime(guard: RediniGuard, store: AtelierStore): O
           const prev = store.design.logo.size;
           store.resizeLogo(Number(p.size));
           return { ...op, params: { target: 'logo', size: prev } };
-        }
-        case 'addVariant': {
-          const v = store.createVariant(typeof p.name === 'string' ? p.name : undefined);
-          // Dynamic registration beat: the new variant gets its own read-only tool.
-          guard.registerSafeTool(
-            {
-              name: `select_variant_${v.n}`,
-              title: `Switch to variant "${v.name}"`,
-              description: `Switches the canvas to the variant "${v.name}" (a copy of the design taken when the variant was created). View switch.`,
-              inputSchema: { type: 'object', properties: {} },
-              annotations: { readOnlyHint: true },
-              execute: () => ({ design: store.selectVariant(v.id) }),
-            },
-            { signal: v.controller.signal },
-          );
-          return {
-            id: op.id,
-            kind: 'removeVariant',
-            label: `remove variant "${v.name}"`,
-            params: { variantId: v.id },
-          };
-        }
-        case 'removeVariant': {
-          const v = store.variants.find((x) => x.id === p.variantId);
-          const name = v?.name;
-          store.removeVariant(String(p.variantId));
-          return { id: op.id, kind: 'addVariant', label: `re-create variant "${name ?? ''}"`, params: { name } };
         }
         default:
           throw new Error(`unknown operation kind "${op.kind}"`);
@@ -164,13 +248,11 @@ export function registerAtelierTools(guard: RediniGuard, store: AtelierStore): v
   guard.registerSafeTool({
     name: 'get_current_design',
     title: 'Get current flyer design',
-    description:
-      'Returns the current flyer design (texts, colors, font, logo position/size) and the variants created so far. Read-only.',
+    description: 'Returns the current flyer design (texts, colors, font, logo position/size). Read-only.',
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
     execute: () => ({
       design: store.design,
-      variants: store.variants.map((v) => ({ id: v.id, name: v.name })),
     }),
   });
 
@@ -226,7 +308,8 @@ export function registerAtelierTools(guard: RediniGuard, store: AtelierStore): v
     description:
       'Proposes a multi-operation design ChangeSet from a single intent: the human previews the result, can amend each operation, skip operations, and atomically commit the subset. Nothing changes until the human commits.',
     kinds: OP_KINDS,
-    runtime: createAtelierRuntime(guard, store),
+    inputSchema: DESIGN_UPDATE_INPUT_SCHEMA,
+    runtime: createAtelierRuntime(store),
     describeOperation: buildOpLabel,
     validate: validateOp,
     getStateVersion: () => store.version,

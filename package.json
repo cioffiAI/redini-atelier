@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Redini: a Human-in-the-Loop trust layer for WebMCP — demonstrated by Atelier, an agent-native design studio.",
+  "description": "Transactional ChangeSet layer for negotiable WebMCP agent actions — demonstrated by Atelier, an agent-native design studio.",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

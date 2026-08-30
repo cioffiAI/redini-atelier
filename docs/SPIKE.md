@@ -70,13 +70,15 @@ document.getElementById('test-form').addEventListener('submit', (e) => {
 Setup: registrare in main.ts un tool `add_note` che registra a sua volta `get_note_N` via controller dedicato + listener toolchange.
 **Prompt**: `Add a note saying "hello"` poi `Read my note`
 **Atteso**: dopo add_note, l'agente vede e chiama get_note_N.
-- Se OK → le varianti dinamiche del design (Giorno 3)
-- Se KO → i tool restano statici; le varianti tornano dati nel result di create_variant
+- Se OK → le varianti dinamiche del design (Giorno 3) — **SUPERSEDED in v3**: niente varianti, la superficie è fissa a 5 tool (vedi nota storica sotto)
+- Se KO → i tool restano statici; le varianti tornano dati nel result di create_variant — **SUPERSEDED in v3**: anche questo percorso è abbandonato (create_variant non esiste in v3)
 
 ### Test 6 — Deregistrazione via AbortController
 Setup: tool `temp_echo` registrato con signal; un tool `dispose_temp` che chiama controller.abort().
 **Prompt**: `Call temp echo with "hi"` → atteso: funziona. `Call dispose temp` poi di nuovo `call temp echo` → atteso: il tool non esiste più.
-- Se OK → uscita pulita delle varianti (Giorno 3)
+- Se OK → uscita pulita delle varianti (Giorno 3) — la parte "varianti" è **SUPERSEDED in v3** (niente varianti); la deregistrazione via AbortController resta in v3 per i tool safe
+
+**Nota storica (v3)**: i piani "forward-looking" sotto — form dichiarativo di checkout, `fill_checkout_form`, `get_order_status`, `respondWith` per ordini — sono stati **SUPERSEDED**: v3 non ha checkout né ordini, il prodotto è la negoziazione del ChangeSet (vedi CONCEPT/TECHNICAL-DESIGN v3). Il Test 3/4 aveva valore solo come verifica tecnica di `agentInvoked`/`respondWith`; le decisioni di prodotto che ne derivavano sono state abbandonate in favore del tool changeset `design_update`.
 
 ## 3. Tabella risultati (da compilare)
 
@@ -86,10 +88,10 @@ Setup: tool `temp_echo` registrato con signal; un tool `dispose_temp` che chiama
 | 2 Timeout attesa umana (durata?) | ☐ | ✅ promessa viva >90s, risolta al resolve | ☑ approvazione bloccante |
 | 3 Form dichiarativo compilato | ☐ | ✅ campi riempiti + tool pending | ☑ declarative |
 | 4 respondWith | ☐ | ✅ submit umano chiude il tool con `{status:'booked'}`; `agentInvoked:true` | ☑ conferma strutturata |
-| 5 tool dinamici + toolchange | ☐ | ✅ read_note_1 registrato + 1 evento | ☑ varianti dinamiche |
+| 5 tool dinamici + toolchange | ☐ | ✅ read_note_1 registrato + 1 evento | ☑ varianti dinamiche — **SUPERSEDED in v3** (superficie fissa a 5 tool) |
 | 6 AbortController | ☐ | ✅ temp_echo rimosso | ☑ deregistrazione pulita |
 
-Nota firma: `executeTool(tool, args)` richiede **args come STRINGA JSON** (oggetti → "Failed to parse input arguments"). Script: `scripts/spike-auto.mjs`. Residuo: ripetere i test col browser in-app di ChatGPT (agente reale, ~10 min, prompt già pronti qui sopra).
+Nota firma (verificata in v3): `executeTool(registeredTool, args)` richiede (1) l'**oggetto RegisteredTool restituito da `getTools()`** come primo argomento e (2) **args come STRINGA JSON** (oggetti → "Failed to parse input arguments"); la risposta arriva serializzata come stringa JSON. Script storico: `scripts/spike-auto.mjs` (rimosso — vedi nota in testa). Residuo: ripetere i test col browser in-app di ChatGPT (agente reale, ~10 min, prompt già pronti qui sopra).
 
 La MINIMA barriera di partenza è il Test 1 su almeno uno dei due browser. Tutto il resto ha fallback.
 

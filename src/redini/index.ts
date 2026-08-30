@@ -20,7 +20,6 @@ export type {
   OperationStatus,
   PreviewInfo,
   ReceiptRow,
-  RegisterToolRequest,
   SafeToolDefinition,
   ToolAnnotations,
   ToolExecutionContext,

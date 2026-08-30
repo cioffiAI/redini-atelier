@@ -2,9 +2,12 @@ import type { AtelierStore, FlyerDesign } from './store';
 import { templates } from './templates';
 
 /**
- * Atelier DOM rendering: flyer canvas (+ staged ghost preview), template gallery,
- * variants. Subscribes to the store; exposes setGhost() so proposals become
+ * Atelier DOM rendering: flyer canvas (+ staged ghost preview) and template
+ * gallery. Subscribes to the store; exposes setGhost() so proposals become
  * visible on the canvas BEFORE they happen.
+ *
+ * Safe-DOM invariant: no innerHTML interpolation of dynamic values anywhere —
+ * every dynamic string goes through createElement/textContent.
  */
 export function initAtelierUI(
   store: AtelierStore,
@@ -14,7 +17,6 @@ export function initAtelierUI(
   const ghostEl = document.getElementById('flyer-ghost')!;
   const ghostBadge = document.getElementById('ghost-badge')!;
   const tplListEl = document.getElementById('template-list')!;
-  const variantsEl = document.getElementById('variants-list')!;
 
   function paintFlyer(target: HTMLElement, d: FlyerDesign): void {
     target.innerHTML = '';
@@ -52,24 +54,13 @@ export function initAtelierUI(
     tplListEl.innerHTML = '';
     for (const t of templates) {
       const li = document.createElement('li');
-      li.innerHTML = `<strong>${t.name}</strong><span>${t.styleTags.join(' · ')}</span>`;
+      const strong = document.createElement('strong');
+      strong.textContent = t.name;
+      const span = document.createElement('span');
+      span.textContent = t.styleTags.join(' · ');
+      li.append(strong, span);
       li.addEventListener('click', () => onPickTemplate(t.id));
       tplListEl.appendChild(li);
-    }
-
-    variantsEl.innerHTML = '';
-    if (store.variants.length === 0) {
-      const li = document.createElement('li');
-      li.className = 'empty';
-      li.textContent = 'No variants yet';
-      variantsEl.appendChild(li);
-    } else {
-      for (const v of store.variants) {
-        const li = document.createElement('li');
-        li.innerHTML = `<strong>${v.name}</strong><span>variant ${v.n} · click to view</span>`;
-        li.addEventListener('click', () => store.selectVariant(v.id));
-        variantsEl.appendChild(li);
-      }
     }
   }
 

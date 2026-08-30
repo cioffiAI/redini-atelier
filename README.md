@@ -1,26 +1,109 @@
-# Redini — reins for your AI agent
+# Atelier — an agent-native design studio, powered by Redini
 
-**Redini** is an open-source Human-in-the-Loop trust layer for [WebMCP](https://webmachinelearning.github.io/webmcp/): it wraps `document.modelContext` so that AI agents can *propose* actions on a web app, and users can *approve, edit, or decline* them — with full undo.
+**Atelier** is a WebMCP design editor where agent actions arrive as **editable ChangeSets** rather than silent mutations. One agent intent can produce multiple proposed operations. Before application state changes, the person can **preview the proposal, amend individual parameters, skip individual operations** and **commit the accepted subset**.
 
-It is demonstrated by **Atelier**, an agent-native design studio where an AI agent edits a flyer and every change goes through a visible approval queue.
+**Redini** is the small transaction layer underneath.
 
-> Work in progress — hackathon build (The WebMCP Challenge). See `docs/` for the design documents.
+## The flow
 
-## Quickstart
+```
+agent intent
+      ↓
+ONE WebMCP call (design_update)   ← one intent → one ChangeSet
+      ↓
+ChangeSet — e.g. 3 operations
+
+  [✓] setText title → "Ghost Title"
+  [✓] setFill background → #224466
+  [✓] move logo → (40, 40)
+
+      ↓
+preview (ghost on the canvas) → amend parameters → skip operations (cherry-pick)
+      ↓
+atomic commit of the accepted subset
+      ↓
+RECEIPT — INTENDED / AMENDED BY HUMAN / SKIPPED BY HUMAN / APPLIED
+      ↓
+deterministic undo (inverse operations, not snapshots)
+```
+
+Nothing touches application state until the human commits. The agent's `executeTool` call stays **pending** for the whole negotiation and resolves with a direct structured result: `{status, changeSetId, appliedCount, amendedCount, skippedCount, undoAvailable}` — it never dies, never throws an unhandled rejection.
+
+Example receipt (what the panel renders after a commit):
+
+```
+RECEIPT #a1b2c3d4
+
+INTENDED
+  op-1. title → "Ghost Title"
+  op-2. background fill → #224466
+  op-3. logo → (40, 40)
+
+AMENDED BY HUMAN
+  op-1. title → "Amended Title"   (was: title → "Ghost Title")
+
+SKIPPED BY HUMAN
+  op-2. background fill → #224466
+
+APPLIED (committed values)
+  op-1. title → "Amended Title"
+  op-3. logo → (40, 40)
+
+STATE: v0 → v2
+UNDO: available
+```
+
+## The 5 tools
+
+| Tool | Mode | What it does |
+|---|---|---|
+| `design_update` | changeset | ONE intent + operations array → editable ChangeSet, strict per-kind inputSchema |
+| `list_templates` | safe | Lists the flyer templates (id, name, style tags) |
+| `get_current_design` | safe | Current flyer design state, read-only |
+| `filter_templates` | safe | Filters templates by a style description |
+| `get_vendor_content` | safe | Untrusted vendor promo copy — `untrustedContentHint` set |
+
+Operation vocabulary (each with an exact inverse): `setText`, `setFill`, `setFont`, `move`, `resize`. The tool surface is **fixed**: no dynamic tools are ever registered.
+
+## How this differs
+
+Approval gates exist (allow/deny modals, platform confirmations), diff/undo editors exist, and WebMCP confirmations exist. We know — the honest comparison:
+
+- **Platform confirmations / approval gates** answer yes/no to a prepared action. Atelier's ChangeSet is **editable per operation**: the human changes parameters of individual operations before anything commits, and can skip individual operations (cherry-pick) — the subset is what commits.
+- **Diff/undo editors** show a before/after of one change. Redini stages **multiple proposed operations from one agent intent** inside **ONE live WebMCP invocation** and keeps the agent's promise pending until the human decides; the receipt records the distance between what the agent intended and what the human co-authored.
+- **Undo**: deterministic **inverse operations** per applied operation (limited vocabulary, exact undo), not generic snapshots.
+
+**Atomicity** — Atelier applies its deterministic local operation subset atomically using compensating inverse operations. No universal claims beyond that: Redini runs in the page, it is human control, recoverability and auditable mutations — not a security boundary.
+
+## How to run
 
 ```bash
 npm install
-npm run dev
+npm run dev        # dev server → http://localhost:5173
+npm test           # vitest unit tests
+npm run build      # tsc && vite build
+node scripts/atelier-e2e.mjs   # real WebMCP e2e (needs dev server + Chrome)
 ```
 
-Then open the app in ChatGPT's in-app browser (WebMCP is supported out of the box), or in Chrome 149+ with `chrome://flags/#enable-webmcp-testing` enabled.
+WebMCP needs a supporting browser: Chrome 149+ launched with
+`--enable-features=WebMCP`, or a WebMCP-capable in-app browser (e.g. ChatGPT's).
 
-## What Redini does
+### URL parameters
 
-- **Approval queue**: mutating tools (`mode: 'approval-required'`) don't execute immediately — they surface in a panel with a human-readable description and Approve / Edit / Decline controls.
-- **Read tools run free**: tools declared `mode: 'safe'` (read-only) execute instantly.
-- **Undo**: every approved action snapshots the app state first; one click restores it.
-- **Activity log**: every agent action is recorded with its outcome.
+- `?clean=1` — hides the human-facing hint text. Agent-side mutation still happens only through the `design_update` ChangeSet tool; the template gallery remains a human path, and it also goes through a ChangeSet.
+- `?debug=1` — exposes `window.__guard` in the console for interactive debugging. The e2e does **not** use it.
+
+### E2E troubleshooting
+
+- If `node scripts/atelier-e2e.mjs` cannot find Chrome: adjust `CHROME` at the top of the script.
+- Stale Chrome profile: `pkill -f "user-data-dir=/tmp/atelier-chrome-profile"` before rerunning.
+- Dev server down: `nohup npm run dev > /tmp/vite-dev.log 2>&1 &`.
+
+## Repository layout
+
+- `src/atelier/` — the demo app: design store (pure logic), tools, UI.
+- `src/redini/` — the transaction layer: guard, ChangeSet model, DOM panel, in-memory UI adapter. Application-agnostic: it knows nothing about flyers.
+- `docs/` — concept, technical design (v3 semantics), plan, spike report.
 
 ## License
 

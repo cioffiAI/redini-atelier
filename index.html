@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Atelier — an agent-native design studio, powered by Redini</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./src/styles.css" />
   </head>
   <body>
@@ -19,22 +20,16 @@
           <div id="flyer-ghost" class="flyer ghost hidden" aria-hidden="true"></div>
           <span id="ghost-badge" class="ghost-badge hidden">PROPOSED — staged, not applied</span>
         </div>
-        <div class="panel-row">
-          <div class="templates">
-            <h3>Templates <span class="hint">— clicking applies instantly (you are human)</span></h3>
-            <ul id="template-list"></ul>
-          </div>
-          <div class="variants">
-            <h3>Variants</h3>
-            <ul id="variants-list"><li class="empty">No variants yet</li></ul>
-          </div>
+        <div class="templates">
+          <h3>Templates <span class="hint">— clicking applies instantly (you are human)</span></h3>
+          <ul id="template-list"></ul>
         </div>
         <p class="human-hint hint-wide">Try asking the agent: “Make this poster more minimal — change the title, soften the background color, move the logo to the top-left corner.” One intent becomes one editable ChangeSet: preview it, amend parameters, skip operations, commit the subset, undo everything.</p>
       </section>
       <aside id="guardrail-panel">
         <h3>Redini — ChangeSet negotiation</h3>
         <p class="tagline">One agent intent → one editable ChangeSet. Preview, amend, cherry-pick, commit atomically, undo deterministically.</p>
-        <div id="approval-queue">
+        <div id="change-queue">
           <p class="empty">No pending agent actions.</p>
         </div>
         <h4>Audit trail</h4>

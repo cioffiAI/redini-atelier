@@ -15,9 +15,11 @@ export type ChangeSetStatus =
   | 'reviewing'
   | 'committed'
   | 'declined'
+  | 'cancelled'
   | 'undone'
   | 'stale'
-  | 'failed';
+  | 'failed'
+  | 'undo_failed';
 
 export type OperationStatus = 'intended' | 'amended' | 'skipped' | 'applied' | 'failed';
 
@@ -25,7 +27,16 @@ export type OperationStatus = 'intended' | 'amended' | 'skipped' | 'applied' | '
 export interface Operation {
   id: string;
   kind: string;
+  /** Human one-liner; recomputed from the CURRENT (possibly amended) params. */
   label: string;
+  /**
+   * The description the agent originally proposed — set once at dispatch, never
+   * recomputed. OPTIONAL on purpose: only the guard fills it for STAGED ops;
+   * runtime.apply() returns inverse Operations and is not required to carry
+   * provenance (ChangeSetOperation.originalLabel stays required: the guard
+   * always provides it).
+   */
+  originalLabel?: string;
   params: Record<string, unknown>;
 }
 
@@ -33,7 +44,10 @@ export interface Operation {
 export interface ChangeSetOperation {
   id: string;
   kind: string;
+  /** Human one-liner; recomputed from the CURRENT (possibly amended) params. */
   label: string;
+  /** What the agent originally proposed. */
+  originalLabel: string;
   /** Current params (amended by the human, if so). */
   params: Record<string, unknown>;
   /** What the agent originally proposed. */
@@ -58,8 +72,14 @@ export interface ChangeSet {
 
 export interface ReceiptRow {
   id: string;
+  kind: string;
+  /** Description of the CURRENT value of this row (label = amended/committed label). */
   label: string;
+  /** The description the agent originally proposed (amended rows render "before → after"). */
+  originalLabel?: string;
   params: Record<string, unknown>;
+  /** The agent's original parameters, when they differ (amended rows). */
+  originalParams?: Record<string, unknown>;
 }
 
 /**
@@ -68,18 +88,22 @@ export interface ReceiptRow {
  */
 export interface ChangeSetReceipt {
   transactionId: string;
+  /** Alias of transactionId for the structured agent result. */
+  changeSetId: string;
   tool: string;
   intent: string;
+  /** Ops as the agent proposed them: original label + original params. */
   intended: ReceiptRow[];
   /** Ops whose parameters were changed by the human (and applied). */
   amended: ReceiptRow[];
   /** Ops excluded by the human. */
   skippedByHuman: ReceiptRow[];
-  /** Op ids applied, in order. */
-  applied: string[];
+  /** Every applied op with the ACTUAL COMMITTED values (current params + current label). */
+  applied: ReceiptRow[];
   stateVersionBefore: number;
   stateVersionAfter: number;
   undoToken: string;
+  proposedAt: number;
   committedAt: number;
 }
 
@@ -99,7 +123,8 @@ export type AuditKind =
   | 'failed'
   | 'stale'
   | 'rolled_back'
-  | 'cancelled';
+  | 'cancelled'
+  | 'undo_failed';
 
 export interface AuditEntry {
   kind: AuditKind;
@@ -115,21 +140,23 @@ export interface PreviewInfo {
   diff?: unknown;
 }
 
-/** Structured outcome returned to the agent. The conversation never dies on Redini. */
-export type AgentOutcome =
-  | {
-      status: 'committed';
-      txId: string;
-      intent: string;
-      appliedCount: number;
-      amendedCount: number;
-      skippedCount: number;
-      receipt: ChangeSetReceipt;
-    }
-  | { status: 'declined_by_user'; txId: string; reason?: string }
-  | { status: 'cancelled'; txId: string }
-  | { status: 'stale_transaction'; txId: string; message: string }
-  | { status: 'execute_failed'; txId: string; error: string };
+/**
+ * Structured outcome returned to the agent. The conversation never dies on Redini:
+ * the changeset execute callback NEVER rejects and always resolves with this
+ * direct, serializable object (no MCP text envelope).
+ */
+export interface ChangeSetResult {
+  status: 'committed' | 'declined_by_user' | 'cancelled' | 'stale_transaction' | 'execute_failed';
+  /** null when the failure happened BEFORE any ChangeSet was staged (pre-staging validation). */
+  changeSetId: string | null;
+  appliedCount: number;
+  amendedCount: number;
+  skippedCount: number;
+  undoAvailable: boolean;
+  error?: { code: string; message: string };
+}
+
+export type AgentOutcome = ChangeSetResult;
 
 export interface ToolAnnotations {
   readOnlyHint?: boolean;
@@ -181,10 +208,6 @@ export interface ChangeSetToolDefinition {
   /** App-owned state version for the explicit stale guard. Optional but recommended. */
   getStateVersion?: () => number;
 }
-
-export type RegisterToolRequest =
-  | (SafeToolDefinition & { mode: 'safe' })
-  | (ChangeSetToolDefinition & { mode: 'changeset' });
 
 /** Minimal structural type of the WebMCP model context Redini registers into. */
 export interface ModelContextLike {

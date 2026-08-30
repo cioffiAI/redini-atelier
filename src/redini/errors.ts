@@ -6,14 +6,23 @@ export type RediniErrorCode =
   | 'ALREADY_UNDONE'
   | 'STALE_TRANSACTION'
   | 'INVALID_OPERATION'
-  | 'EMPTY_CHANGESET';
+  | 'INVALID_AMENDMENT'
+  | 'EMPTY_CHANGESET'
+  | 'EXECUTION_FAILED'
+  | 'ROLLBACK_FAILED'
+  | 'UNDO_FAILED';
 
 export class RediniError extends Error {
   readonly code: RediniErrorCode;
+  override readonly cause?: unknown;
+  /** Structured bundle for failure paths that carry partial-state detail (e.g. ROLLBACK_FAILED, UNDO_FAILED). */
+  readonly detail?: Record<string, unknown>;
 
-  constructor(code: RediniErrorCode, message: string) {
+  constructor(code: RediniErrorCode, message: string, cause?: unknown, detail?: Record<string, unknown>) {
     super(`[${code}] ${message}`);
     this.name = 'RediniError';
     this.code = code;
+    if (cause !== undefined) this.cause = cause;
+    if (detail !== undefined) this.detail = detail;
   }
 }
