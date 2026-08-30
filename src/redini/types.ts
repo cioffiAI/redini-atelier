@@ -1,20 +1,16 @@
 /**
- * Redini — transaction layer for agentic web actions on WebMCP.
+ * Redini v3 — transaction layer for agentic web actions.
  *
- * Core semantics (v0.2):
- *   agent intent → proposed mutation → preview/diff → human edit → commit → receipt → undo
- *
- * Non-negotiable properties:
- *   1. Transactions are first-class objects with a lifecycle:
- *      proposed → reviewing → committed | declined → undone (terminal: stale | failed)
- *   2. Editable commit: the receipt preserves BOTH proposedInput and committedInput.
- *   3. Optimistic concurrency: a transaction proposed on a state that changed before
- *      commit fails explicitly (STALE_TRANSACTION) — never applies silently.
- *   4. Verifiable rollback: receipt.undoToken → undo() restores the exact previous
- *      state and produces a new undo event in the audit trail. Tokens are single-use.
+ * Centre of gravity: the multi-operation ChangeSet.
+ * One agent intent → one WebMCP call → one ChangeSet of individually
+ * addressable operations. The human can preview the result, amend parameters,
+ * skip operations (cherry-pick) and atomically commit the subset.
+ * The receipt records the distance between the agent's INTENTION and the
+ * human co-authored RESULT. Undo is deterministic: limited inverse operations,
+ * not generic snapshots.
  */
 
-export type TransactionStatus =
+export type ChangeSetStatus =
   | 'proposed'
   | 'reviewing'
   | 'committed'
@@ -23,33 +19,70 @@ export type TransactionStatus =
   | 'stale'
   | 'failed';
 
-/** First-class transaction object. `committedInput` is set only after a commit. */
-export interface Transaction {
+export type OperationStatus = 'intended' | 'amended' | 'skipped' | 'applied' | 'failed';
+
+/** A single, individually addressable change with a limited inverse. */
+export interface Operation {
+  id: string;
+  kind: string;
+  label: string;
+  params: Record<string, unknown>;
+}
+
+/** Public view of one operation inside a ChangeSet. */
+export interface ChangeSetOperation {
+  id: string;
+  kind: string;
+  label: string;
+  /** Current params (amended by the human, if so). */
+  params: Record<string, unknown>;
+  /** What the agent originally proposed. */
+  originalParams: Record<string, unknown>;
+  /** false = skipped by the human (cherry-pick). */
+  included: boolean;
+  amended: boolean;
+  status: OperationStatus;
+}
+
+export interface ChangeSet {
   id: string;
   tool: string;
-  proposedInput: Record<string, unknown>;
-  committedInput: Record<string, unknown> | null;
-  /** App-provided state version at proposal time (0 when the app has none). */
+  /** The agent's stated intent, one sentence. */
+  intent: string;
+  operations: ChangeSetOperation[];
   stateVersion: number;
-  status: TransactionStatus;
+  status: ChangeSetStatus;
   proposedAt: number;
   committedAt: number | null;
 }
 
-/** Produced once per successful commit. Immutable. */
-export interface Receipt {
+export interface ReceiptRow {
+  id: string;
+  label: string;
+  params: Record<string, unknown>;
+}
+
+/**
+ * The memorable artifact: the distance between what the agent intended
+ * and what the human actually co-authored.
+ */
+export interface ChangeSetReceipt {
   transactionId: string;
   tool: string;
-  proposedInput: Record<string, unknown>;
-  committedInput: Record<string, unknown>;
-  stateBefore: unknown;
-  stateAfter: unknown;
-  /** Single-use token that lets undo() restore `stateBefore`. */
+  intent: string;
+  intended: ReceiptRow[];
+  /** Ops whose parameters were changed by the human (and applied). */
+  amended: ReceiptRow[];
+  /** Ops excluded by the human. */
+  skippedByHuman: ReceiptRow[];
+  /** Op ids applied, in order. */
+  applied: string[];
+  stateVersionBefore: number;
+  stateVersionAfter: number;
   undoToken: string;
   committedAt: number;
 }
 
-/** Produced once per successful undo. Enters the audit trail. */
 export interface UndoEvent {
   type: 'undo';
   transactionId: string;
@@ -76,16 +109,23 @@ export interface AuditEntry {
   detail?: Record<string, unknown>;
 }
 
-/** Human-facing preview of what the proposed mutation would change. */
 export interface PreviewInfo {
   summary: string;
-  /** Domain-specific diff payload (rendered by the UI adapter). */
+  /** Domain-specific payload — for Atelier: the simulated design after the subset. */
   diff?: unknown;
 }
 
 /** Structured outcome returned to the agent. The conversation never dies on Redini. */
 export type AgentOutcome =
-  | { status: 'committed'; txId: string; result: unknown; humanEdited: boolean }
+  | {
+      status: 'committed';
+      txId: string;
+      intent: string;
+      appliedCount: number;
+      amendedCount: number;
+      skippedCount: number;
+      receipt: ChangeSetReceipt;
+    }
   | { status: 'declined_by_user'; txId: string; reason?: string }
   | { status: 'cancelled'; txId: string }
   | { status: 'stale_transaction'; txId: string; message: string }
@@ -103,7 +143,6 @@ export interface ToolExecutionContext {
 /** Read-only (or side-effect-free-for-the-agent) tool: executes immediately. */
 export interface SafeToolDefinition {
   name: string;
-  /** Human-readable label (WebMCP ModelContextTool.title). */
   title?: string;
   description: string;
   inputSchema?: object;
@@ -111,31 +150,41 @@ export interface SafeToolDefinition {
   execute: (input: Record<string, unknown>, ctx: ToolExecutionContext) => unknown | Promise<unknown>;
 }
 
-/** Mutating tool: every call becomes a staged transaction decided by the human. */
-export interface TransactionalToolDefinition {
+/**
+ * The app implements this against its own state. `apply` mutates the real
+ * state and returns the inverse operation — that is what makes undo
+ * deterministic instead of snapshot-based.
+ */
+export interface OperationRuntime {
+  apply: (op: Operation) => Operation;
+  /** Apply a subset to a throw-away copy of the state: the preview. */
+  simulate: (ops: Array<{ kind: string; params: Record<string, unknown> }>) => unknown;
+}
+
+/**
+ * The ONE agent-facing tool: an intent plus an array of operations.
+ * The human amends, cherry-picks and atomically commits the subset.
+ */
+export interface ChangeSetToolDefinition {
   name: string;
-  /** Human-readable label (WebMCP ModelContextTool.title). */
   title?: string;
   description: string;
+  /** Allowed operation kinds (app-defined vocabulary with inverses). */
+  kinds: string[];
+  /** Optional schema override; by default Redini generates one from `kinds`. */
   inputSchema?: object;
-  annotations?: ToolAnnotations;
-  execute: (input: Record<string, unknown>, ctx: ToolExecutionContext) => unknown | Promise<unknown>;
-  /** Capture the state to restore on undo. Must return an immutable snapshot. */
-  snapshot: () => unknown;
-  /** Restore a snapshot captured by `snapshot`. */
-  restore: (stateBefore: unknown) => void | Promise<void>;
-  /** Human-facing preview of the proposed change. */
-  preview?: (input: Record<string, unknown>) => PreviewInfo | null;
-  /**
-   * App-owned state version for optimistic concurrency. Optional: Redini also
-   * tracks its own mutation counter, so the stale guard works even without it.
-   */
+  /** Optional per-operation validation. Return an error string to reject. */
+  validate?: (op: { kind: string; params: Record<string, unknown> }) => string | null;
+  runtime: OperationRuntime;
+  /** Human one-liner for an operation, e.g. `title → "AI SUMMIT"`. */
+  describeOperation?: (op: { kind: string; params: Record<string, unknown> }) => string;
+  /** App-owned state version for the explicit stale guard. Optional but recommended. */
   getStateVersion?: () => number;
 }
 
 export type RegisterToolRequest =
   | (SafeToolDefinition & { mode: 'safe' })
-  | (TransactionalToolDefinition & { mode: 'transaction' });
+  | (ChangeSetToolDefinition & { mode: 'changeset' });
 
 /** Minimal structural type of the WebMCP model context Redini registers into. */
 export interface ModelContextLike {
@@ -152,11 +201,11 @@ export interface ModelContextLike {
   ): Promise<void> | void;
 }
 
-/** UI adapter contract: Redini is UI-agnostic; DOM, in-memory, or custom renderers plug in. */
+/** UI adapter contract: Redini is UI-agnostic. */
 export interface UIAdapter {
-  /** Upsert of a transaction card (called on proposal, on edit, on every status change). */
-  onTransactionUpdated(tx: Transaction, preview: PreviewInfo | null): void;
-  onReceipt(receipt: Receipt): void;
+  /** Upsert of the ChangeSet card (proposal, amendment, cherry-pick, status changes). */
+  onChangesetUpdated(cs: ChangeSet, preview: PreviewInfo | null): void;
+  onReceipt(receipt: ChangeSetReceipt): void;
   onUndo(event: UndoEvent): void;
   onAudit(entry: AuditEntry): void;
 }

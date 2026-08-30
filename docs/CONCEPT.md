@@ -1,16 +1,32 @@
 # CONCEPT — "Redini" (nome di lavoro)
-> Transaction layer for agentic web actions — dimostrato da Atelier, studio di design agent-native.
+> Atelier turns an agent action into an editable ChangeSet. People can preview, amend, cherry-pick, commit and undo changes before the live canvas is mutated.
+> Redini is the transaction layer underneath.
 
-Stato: BOZZA v0.2 — 29/08/2026 (pivot di posizionamento dal "consent wrapper" alla transaction layer)
-Regole di riferimento: Official Rules "The WebMCP Challenge" (webmcp.devpost.com) — deadline 3 set 2026, 13:00 PDT (22:00 ora italiana). Prem premi: $35.000 cash totali, 10 vincitori × $3.500 cash ($3.000 OpenAI + $500 Netlify) + crediti/gear.
+Stato: BOZZA v0.3 — 30/08/2026 — cambio di centro di gravità: da "approval queue" (già territorio affollato: @mcptrail/webmcp-consent, WebMCP Text Editor, WebMCP+Legit) alla **negoziazione umano-agente di un ChangeSet multi-operazione**.
 
----
+Nuova unità centrale:
 
-## 1. Tesi in una frase
+```text
+Agent intent
+      ↓
+ONE WebMCP call (design_update)
+      ↓
+ChangeSet — es. 5 operazioni
 
-**Agents shouldn't directly mutate your web app. They should propose transactions humans can inspect, modify, commit, and reverse.**
-
-Redini è una transaction layer per le azioni agentiche sul web: ogni mutazione richiesta da un agente diventa una transazione in staging — con anteprima del diff, parametri modificabili dall'umano, commit che produce una ricevuta, e rollback. L'agente mantiene l'iniziativa; l'utente mantiene il controllo dello stato.
+[✓] setText title → "AI SUMMIT"
+[✓] setFill background → #FF0055
+[✓] setFont → serif
+[ ] move logo → (620, 40)      ← l'umano la esclude
+[✓] resize logo → 120
+      ↓
+l'umano può: modificare i parametri (amend), escludere operazioni (cherry-pick), vedere il ghost
+      ↓
+atomic commit del subset
+      ↓
+RECEIPT: INTENDED / AMENDED / SKIPPED BY HUMAN / APPLIED / STATE v→v / UNDO
+      ↓
+undo deterministico (inverse operations, non snapshot)
+```
 
 ## 2. Perché questo claim (e non quello vecchio)
 

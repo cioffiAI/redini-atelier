@@ -1,15 +1,146 @@
 import type { RediniGuard } from '../redini/guard';
+import type { Operation, OperationRuntime } from '../redini/types';
 import { templates } from './templates';
-import type { AtelierStore, StoreSnapshot } from './store';
-
-const FONT_ENUM = ['Georgia, serif', 'system-ui, sans-serif', 'Courier New, monospace'];
-const CLIPART_ENUM = ['none', '✿', '★', '☕', '♪'];
+import { AtelierStore, CANVAS_H, CANVAS_W, FONT_OPTIONS } from './store';
 
 /**
- * Registers every Atelier capability through Redini:
- * - safe (read-only) tools run immediately;
- * - mutating tools become staged transactions decided by the human.
+ * Atelier's operation vocabulary — intentionally limited, each with an exact inverse:
+ *   setText / setFill / setFont / move / resize / addVariant (inverse: removeVariant)
  */
+export const OP_KINDS = ['setText', 'setFill', 'setFont', 'move', 'resize', 'addVariant'];
+
+const TEXT_FIELDS = ['title', 'subtitle', 'dateLine'];
+const FILL_TARGETS = ['background', 'text'];
+
+function buildOpLabel(op: { kind: string; params: Record<string, unknown> }): string {
+  const p = op.params;
+  switch (op.kind) {
+    case 'setText':
+      return `${String(p.field)} → "${String(p.value)}"`;
+    case 'setFill':
+      return `${String(p.target)} fill → ${String(p.value)}`;
+    case 'setFont':
+      return `font → ${String(p.value)}`;
+    case 'move':
+      return `logo → (${String(p.x)}, ${String(p.y)})`;
+    case 'resize':
+      return `logo size → ${String(p.size)}`;
+    case 'addVariant':
+      return `create variant "${String(p.name ?? 'unnamed')}"`;
+    case 'removeVariant':
+      return `remove variant ${String(p.variantId ?? '')}`;
+    default:
+      return `${op.kind} ${JSON.stringify(p)}`;
+  }
+}
+
+function validateOp(op: { kind: string; params: Record<string, unknown> }): string | null {
+  const p = op.params;
+  switch (op.kind) {
+    case 'setText':
+      if (!TEXT_FIELDS.includes(String(p.field))) return `unknown text field "${String(p.field)}"`;
+      if (typeof p.value !== 'string') return 'value must be a string';
+      return null;
+    case 'setFill':
+      if (!FILL_TARGETS.includes(String(p.target))) return `unknown fill target "${String(p.target)}"`;
+      if (typeof p.value !== 'string' || !p.value.startsWith('#')) return 'fill must be a #rrggbb color';
+      return null;
+    case 'setFont':
+      if (!FONT_OPTIONS.includes(String(p.value))) return `unknown font "${String(p.value)}"`;
+      return null;
+    case 'move': {
+      const x = Number(p.x);
+      const y = Number(p.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return 'x and y must be numbers';
+      if (x < 0 || x > CANVAS_W || y < 0 || y > CANVAS_H) return `logo must stay within ${CANVAS_W}×${CANVAS_H}`;
+      return null;
+    }
+    case 'resize': {
+      const size = Number(p.size);
+      if (!Number.isFinite(size) || size < 16 || size > 200) return 'size must be between 16 and 200';
+      return null;
+    }
+    case 'addVariant':
+      if (p.name !== undefined && typeof p.name !== 'string') return 'name must be a string';
+      return null;
+    case 'removeVariant':
+      if (typeof p.variantId !== 'string') return 'variantId must be a string';
+      return null;
+    default:
+      return `unknown operation kind "${op.kind}"`;
+  }
+}
+
+export function createAtelierRuntime(guard: RediniGuard, store: AtelierStore): OperationRuntime {
+  return {
+    /** Applies one operation to the real state and returns its exact inverse. */
+    apply(op: Operation): Operation {
+      const p = op.params;
+      switch (op.kind) {
+        case 'setText': {
+          const field = String(p.field);
+          const prev = store.design[field as 'title' | 'subtitle' | 'dateLine'];
+          store.setText(field as 'title' | 'subtitle' | 'dateLine', String(p.value));
+          return { ...op, params: { field, value: prev } };
+        }
+        case 'setFill': {
+          const target = String(p.target) as 'background' | 'text';
+          const prev = target === 'background' ? store.design.background : store.design.textColor;
+          store.setFill(target, String(p.value));
+          return { ...op, params: { target, value: prev } };
+        }
+        case 'setFont': {
+          const prev = store.design.fontFamily;
+          store.setFont(String(p.value));
+          return { ...op, params: { value: prev } };
+        }
+        case 'move': {
+          const prev = { ...store.design.logo };
+          store.moveLogo(Number(p.x), Number(p.y));
+          return { ...op, params: { target: 'logo', x: prev.x, y: prev.y } };
+        }
+        case 'resize': {
+          const prev = store.design.logo.size;
+          store.resizeLogo(Number(p.size));
+          return { ...op, params: { target: 'logo', size: prev } };
+        }
+        case 'addVariant': {
+          const v = store.createVariant(typeof p.name === 'string' ? p.name : undefined);
+          // Dynamic registration beat: the new variant gets its own read-only tool.
+          guard.registerSafeTool(
+            {
+              name: `select_variant_${v.n}`,
+              title: `Switch to variant "${v.name}"`,
+              description: `Switches the canvas to the variant "${v.name}" (a copy of the design taken when the variant was created). View switch.`,
+              inputSchema: { type: 'object', properties: {} },
+              annotations: { readOnlyHint: true },
+              execute: () => ({ design: store.selectVariant(v.id) }),
+            },
+            { signal: v.controller.signal },
+          );
+          return {
+            id: op.id,
+            kind: 'removeVariant',
+            label: `remove variant "${v.name}"`,
+            params: { variantId: v.id },
+          };
+        }
+        case 'removeVariant': {
+          const v = store.variants.find((x) => x.id === p.variantId);
+          const name = v?.name;
+          store.removeVariant(String(p.variantId));
+          return { id: op.id, kind: 'addVariant', label: `re-create variant "${name ?? ''}"`, params: { name } };
+        }
+        default:
+          throw new Error(`unknown operation kind "${op.kind}"`);
+      }
+    },
+    /** Preview: the design after the included subset — without touching real state. */
+    simulate: (ops) => store.simulate(ops),
+  };
+}
+
+/** Registers every Atelier capability through Redini. */
 export function registerAtelierTools(guard: RediniGuard, store: AtelierStore): void {
   // ---------- SAFE (read-only) ----------
 
@@ -34,28 +165,23 @@ export function registerAtelierTools(guard: RediniGuard, store: AtelierStore): v
     name: 'get_current_design',
     title: 'Get current flyer design',
     description:
-      'Returns the current flyer design (title, subtitle, date line, colors, font, clipart), the variants created so far and how many orders exist. Read-only.',
+      'Returns the current flyer design (texts, colors, font, logo position/size) and the variants created so far. Read-only.',
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
     execute: () => ({
       design: store.design,
       variants: store.variants.map((v) => ({ id: v.id, name: v.name })),
-      ordersCount: store.orders.length,
     }),
   });
 
   guard.registerSafeTool({
     name: 'filter_templates',
     title: 'Filter templates by style',
-    description:
-      'Filters templates by a natural-language style description (matched against names and style tags). Read-only.',
+    description: 'Filters templates by a natural-language style description. Read-only.',
     inputSchema: {
       type: 'object',
       properties: {
-        description: {
-          type: 'string',
-          description: 'Style keywords, e.g. "minimal", "dark and elegant", "spring".',
-        },
+        description: { type: 'string', description: 'Style keywords, e.g. "minimal", "dark and elegant".' },
       },
       required: ['description'],
     },
@@ -69,9 +195,7 @@ export function registerAtelierTools(guard: RediniGuard, store: AtelierStore): v
               t.styleTags.some((tag) => tag.includes(q) || q.includes(tag)),
           )
         : templates;
-      return {
-        matches: matches.map((t) => ({ id: t.id, name: t.name, styleTags: t.styleTags })),
-      };
+      return { matches: matches.map((t) => ({ id: t.id, name: t.name, styleTags: t.styleTags })) };
     },
   });
 
@@ -90,132 +214,21 @@ export function registerAtelierTools(guard: RediniGuard, store: AtelierStore): v
     annotations: { readOnlyHint: true, untrustedContentHint: true },
     execute: (input) => {
       const t = templates.find((t) => t.id === input.templateId);
-      return {
-        templateId: input.templateId,
-        note: t?.vendorNote ?? 'No vendor note for this template.',
-      };
+      return { templateId: input.templateId, note: t?.vendorNote ?? 'No vendor note for this template.' };
     },
   });
 
-  // ---------- TRANSACTIONAL (staged for human decision) ----------
+  // ---------- THE ChangeSet tool ----------
 
-  guard.registerTransactionalTool({
-    name: 'edit_flyer',
-    title: 'Edit flyer (staged)',
+  guard.registerChangeSetTool({
+    name: 'design_update',
+    title: 'Design update (ChangeSet)',
     description:
-      'Proposes edits to the flyer: title, subtitle, date line, background/text colors, font family or clipart. Nothing is applied until the human commits. The preview shows a field-level diff and a ghost preview on the canvas.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        title: { type: 'string', description: 'Main headline of the flyer.' },
-        subtitle: { type: 'string', description: 'Supporting line under the title.' },
-        dateLine: { type: 'string', description: 'Date, time and place line.' },
-        background: { type: 'string', description: 'CSS color for the flyer background.' },
-        color: { type: 'string', description: 'CSS color for the flyer text.' },
-        fontFamily: { type: 'string', enum: FONT_ENUM, description: 'Font family.' },
-        clipart: { type: 'string', enum: CLIPART_ENUM, description: 'Decorative symbol.' },
-      },
-    },
-    preview: (input) => {
-      const changes = store.diffEdit(input);
-      return {
-        summary: changes.length
-          ? `${changes.length} change(s): ${changes.map((c) => `${c.field} → ${String(c.to)}`).join('; ')}`
-          : 'No visible change',
-        diff: { changes, ghostDesign: store.ghostDesign(input) },
-      };
-    },
-    execute: (input) => store.applyEdit(input),
-    snapshot: (): StoreSnapshot => store.snapshotAll(),
-    restore: (s) => store.restoreAll(s as StoreSnapshot),
-  });
-
-  guard.registerTransactionalTool({
-    name: 'apply_template',
-    title: 'Apply template (staged)',
-    description:
-      'Proposes applying a template preset (background, text color, font) to the flyer. Nothing is applied until the human commits. The canvas shows a ghost preview meanwhile.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        templateId: { type: 'string', description: 'Template id from list_templates.' },
-      },
-      required: ['templateId'],
-    },
-    preview: (input) => {
-      const t = templates.find((t) => t.id === input.templateId);
-      if (!t) return { summary: `Unknown template "${String(input.templateId)}"` };
-      const ghost = store.ghostDesign({ templateId: t.id });
-      return {
-        summary: `Apply template "${t.name}" (background, text color, font)`,
-        diff: { ghostDesign: ghost },
-      };
-    },
-    execute: (input) => store.applyTemplate(String(input.templateId)),
-    snapshot: (): StoreSnapshot => store.snapshotAll(),
-    restore: (s) => store.restoreAll(s as StoreSnapshot),
-  });
-
-  guard.registerTransactionalTool({
-    name: 'create_variant',
-    title: 'Create variant (staged)',
-    description:
-      'Proposes duplicating the current flyer into a named variant. On commit, a read-only tool select_variant_N becomes available to switch the canvas to it. Undo removes the variant and unregisters its tool.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'Human-readable variant name.' },
-      },
-    },
-    preview: (input) => ({
-      summary: `Create variant "${String(input.name ?? 'unnamed')}" from the current design`,
-    }),
-    execute: (input) => {
-      const v = store.createVariant(typeof input.name === 'string' ? input.name : undefined);
-      guard.registerSafeTool(
-        {
-          name: `select_variant_${v.n}`,
-          title: `Switch to variant "${v.name}"`,
-          description: `Switches the canvas to the variant "${v.name}" (a copy of the design taken when the variant was created). View switch; revert by selecting another variant or the master design via the variants list.`,
-          inputSchema: { type: 'object', properties: {} },
-          annotations: { readOnlyHint: true },
-          execute: () => ({ design: store.selectVariant(v.id) }),
-        },
-        { signal: v.controller.signal },
-      );
-      return { variantId: v.id, name: v.name, tool: `select_variant_${v.n}` };
-    },
-    snapshot: (): StoreSnapshot => store.snapshotAll(),
-    restore: (s) => store.restoreAll(s as StoreSnapshot),
-  });
-
-  guard.registerTransactionalTool({
-    name: 'order_prints',
-    title: 'Order prints (staged — maximum barrier)',
-    description:
-      'Proposes a print order of the CURRENT flyer design. This is a real-world action: the staged preview shows the exact design that will be printed, with copies and paper size. Nothing is ordered until the human commits.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        copies: { type: 'number', minimum: 1, maximum: 1000, description: 'Number of copies (1-1000).' },
-        pageSize: { type: 'string', enum: ['A4', 'Letter', 'Legal'], description: 'Paper size.' },
-      },
-      required: ['copies', 'pageSize'],
-    },
-    preview: (input) => ({
-      summary: `Order ${String(input.copies)} copies (${String(input.pageSize)}) of the current design "${store.design.title}" — the preview shows the exact design that will be printed`,
-      diff: { ghostDesign: structuredClone(store.design) },
-    }),
-    execute: (input) => {
-      const order = store.addOrder(Number(input.copies), String(input.pageSize));
-      return {
-        orderNumber: order.id,
-        copies: order.copies,
-        pageSize: order.pageSize,
-        design: order.design,
-      };
-    },
-    snapshot: (): StoreSnapshot => store.snapshotAll(),
-    restore: (s) => store.restoreAll(s as StoreSnapshot),
+      'Proposes a multi-operation design ChangeSet from a single intent: the human previews the result, can amend each operation, skip operations, and atomically commit the subset. Nothing changes until the human commits.',
+    kinds: OP_KINDS,
+    runtime: createAtelierRuntime(guard, store),
+    describeOperation: buildOpLabel,
+    validate: validateOp,
+    getStateVersion: () => store.version,
   });
 }

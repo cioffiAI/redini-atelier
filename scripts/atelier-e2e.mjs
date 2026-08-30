@@ -1,6 +1,7 @@
 /**
- * E2E check: Atelier (agent-native design studio) wired into the real app.
- * Uses the locally installed Chrome with the WebMCP feature flag against the dev server.
+ * E2E check: Atelier + Redini v3 (multi-operation ChangeSet).
+ * Implements the go/no-go criterion: correct a parameter, reject a single
+ * operation, apply the subset, show a coherent receipt — no verbal explanation.
  *
  * Usage: node scripts/atelier-e2e.mjs
  */
@@ -22,70 +23,89 @@ await sleep(800);
 const badge = await page.$eval('#webmcp-status', (el) => el.textContent);
 console.log(`badge: ${badge}`);
 
-// 1. Agent-side discovery includes the Atelier tools
 const tools = await page.evaluate(async () => (await document.modelContext.getTools()).map((t) => t.name));
 console.log(`tools (${tools.length}): ${tools.join(', ')}`);
-for (const t of ['list_templates', 'get_current_design', 'filter_templates', 'get_vendor_content', 'edit_flyer', 'apply_template', 'create_variant', 'order_prints', 'order_prints_form']) {
+for (const t of ['design_update', 'list_templates', 'get_current_design', 'filter_templates', 'get_vendor_content']) {
   if (!tools.includes(t)) throw new Error(`missing tool: ${t}`);
 }
 
-// 2. Agent proposes an edit → ghost preview appears, real flyer UNCHANGED
+// 1. ONE agent intent → ONE call → ONE ChangeSet with 3 operations
 await page.evaluate(() => {
-  window.__guard.dispatch('edit_flyer', { title: 'Ghost Title', color: '#224466' });
+  window.__guard.dispatch('design_update', {
+    intent: 'Make the poster more minimal',
+    operations: [
+      { kind: 'setText', params: { field: 'title', value: 'Ghost Title' } },
+      { kind: 'setFill', params: { target: 'background', value: '#224466' } },
+      { kind: 'move', params: { x: 40, y: 40 } },
+    ],
+  });
 });
 await page.waitForSelector('.tx-card .tx-chip', { timeout: 3000 });
+const csId = await page.evaluate(() => window.__guard.getChangeSets().at(-1).id);
 let chip = await page.$eval('.tx-card .tx-chip', (el) => el.textContent);
-const ghostVisible = await page.$eval('#flyer-ghost', (el) => !el.classList.contains('hidden'));
+const opRows = await page.$$eval('.tx-card .tx-op', (rows) => rows.length);
 const ghostTitle = await page.$eval('#flyer-ghost h2', (el) => el.textContent);
 let realTitle = await page.$eval('#flyer h2', (el) => el.textContent);
-console.log(`staged: chip=${chip}, ghost visible=${ghostVisible} ("${ghostTitle}"), real flyer title="${realTitle}"`);
-if (chip !== 'proposed' || !ghostVisible || ghostTitle !== 'Ghost Title' || realTitle === 'Ghost Title') {
-  throw new Error('staging + ghost preview failed');
+console.log(`staged: chip=${chip}, ops=${opRows}, ghost="${ghostTitle}", real flyer="${realTitle}"`);
+if (chip !== 'proposed' || opRows !== 3 || ghostTitle !== 'Ghost Title' || realTitle === 'Ghost Title') {
+  throw new Error('ChangeSet staging failed');
 }
 
-// 3. Human commits → flyer updates, ghost disappears
+// 2. Cherry-pick: skip op-2 (background) via its checkbox
+const checkboxes = await page.$$('.tx-card .tx-op input[type="checkbox"]');
+await checkboxes[1].click();
+await sleep(400);
+
+// 3. Amend op-1 (title) — the human corrects the agent's parameter
+await page.evaluate((id) => {
+  window.__guard.amendOperation(id, 'op-1', { field: 'title', value: 'Amended Title' });
+}, csId);
+await sleep(400);
+const amendedTitle = await page.$eval('#flyer-ghost h2', (el) => el.textContent);
+console.log(`after amend+skip: ghost title="${amendedTitle}" (ghost tracks the negotiated subset)`);
+if (amendedTitle !== 'Amended Title') throw new Error('amendment did not reach the ghost preview');
+
+// 4. Atomic commit of the subset
 await page.click('.tx-card .tx-commit');
 await sleep(600);
 chip = await page.$eval('.tx-card .tx-chip', (el) => el.textContent);
 realTitle = await page.$eval('#flyer h2', (el) => el.textContent);
-console.log(`after commit: chip=${chip}, flyer title="${realTitle}"`);
-if (chip !== 'committed' || realTitle !== 'Ghost Title') throw new Error('commit flow failed');
+const bg = await page.$eval('#flyer', (el) => el.style.background);
+const logoLeft = await page.$eval('#flyer .logo-badge', (el) => el.style.left);
+const receiptText = await page.$eval('.receipt-pre', (el) => el.textContent);
+console.log(`after commit: chip=${chip}, title="${realTitle}", bg=${bg}, logo.left=${logoLeft}`);
+console.log(`receipt:\n${receiptText}`);
+if (chip !== 'committed') throw new Error('commit failed');
+if (realTitle !== 'Amended Title') throw new Error('amended op not applied');
+if (bg === 'rgb(34, 68, 102)') throw new Error('skipped op was applied anyway'); // bg must NOT be #224466
+if (bg !== 'rgb(255, 253, 248)') throw new Error(`original background unexpectedly changed: ${bg}`);
+if (logoLeft !== '40px') throw new Error('move op not applied');
+if (!receiptText.includes('SKIPPED BY HUMAN') || !receiptText.includes('AMENDED BY HUMAN')) {
+  throw new Error('receipt does not record the negotiation');
+}
 
-// 4. Undo → exact previous state
+// 5. Deterministic undo
 await page.click('#undo-btn');
 await sleep(600);
 realTitle = await page.$eval('#flyer h2', (el) => el.textContent);
-console.log(`after undo: flyer title="${realTitle}"`);
-if (realTitle === 'Ghost Title') throw new Error('undo flow failed');
+const logoLeftAfterUndo = await page.$eval('#flyer .logo-badge', (el) => el.style.left);
+console.log(`after undo: title="${realTitle}", logo.left=${logoLeftAfterUndo}`);
+if (realTitle === 'Amended Title' || logoLeftAfterUndo === '40px') throw new Error('undo failed');
 
-// 5. Order prints: staged → committed → order appears
+// 6. Decline: another intent, declined in full
 await page.evaluate(() => {
-  window.__guard.dispatch('order_prints', { copies: 25, pageSize: 'A4' });
-});
-await sleep(400);
-const orderCard = await page.$$eval('.tx-card .tx-chip', (els) => els[els.length - 1].textContent);
-await page.$$eval('.tx-card .tx-commit', (btns) => btns[btns.length - 1].click());
-await sleep(600);
-const orders = await page.$$eval('#orders-list li', (lis) => lis.map((li) => li.textContent).join(' | '));
-console.log(`order flow: proposal=${orderCard}, orders: ${orders}`);
-if (!orders.includes('ORD-') || !orders.includes('25')) throw new Error('order flow failed');
-
-// 6. Decline flow: proposal → decline → state unchanged
-await page.evaluate(() => {
-  window.__guard.dispatch('edit_flyer', { title: 'SHOULD NOT APPLY' });
+  window.__guard.dispatch('design_update', {
+    intent: 'Should be declined',
+    operations: [{ kind: 'setText', params: { field: 'title', value: 'SHOULD NOT APPLY' } }],
+  });
 });
 await sleep(400);
 const declineBtns = await page.$$('.tx-card .tx-decline');
 await declineBtns[declineBtns.length - 1].click();
 await sleep(400);
-realTitle = await page.$eval('#flyer h2', (el) => el.textContent);
-console.log(`after decline: flyer title="${realTitle}"`);
-if (realTitle === 'SHOULD NOT APPLY') throw new Error('decline flow failed');
+const finalTitle = await page.$eval('#flyer h2', (el) => el.textContent);
+console.log(`after decline: title="${finalTitle}"`);
+if (finalTitle === 'SHOULD NOT APPLY') throw new Error('decline failed');
 
-// 7. Audit trail populated
-const logLen = await page.$$eval('#activity-log li', (lis) => lis.length);
-console.log(`audit entries: ${logLen}`);
-if (logLen < 10) throw new Error('audit trail too short');
-
-console.log('\nATELIER E2E: ALL OK');
+console.log('\nATELIER + REDINI v3 E2E: ALL OK');
 await browser.close();

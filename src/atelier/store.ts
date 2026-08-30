@@ -1,9 +1,17 @@
-import { templates } from './templates';
-
 /**
- * Atelier domain store — pure logic, no DOM.
- * The UI subscribes via onChange; Redini tools mutate through methods.
+ * Atelier domain store v2 — pure logic, no DOM.
+ *
+ * The mutation vocabulary is intentionally limited and every mutation has an
+ * exact inverse: setText, setFill, setFont, move, resize (+ addVariant /
+ * removeVariant for the variant catalogue). That is what makes Redini's undo
+ * deterministic instead of snapshot-based.
  */
+
+export interface LogoState {
+  x: number;
+  y: number;
+  size: number;
+}
 
 export interface FlyerDesign {
   templateId: string | null;
@@ -11,27 +19,13 @@ export interface FlyerDesign {
   subtitle: string;
   dateLine: string;
   background: string;
-  color: string;
+  textColor: string;
   fontFamily: string;
-  clipart: string;
+  logo: LogoState;
 }
 
-export const EDITABLE_FIELDS = [
-  'title',
-  'subtitle',
-  'dateLine',
-  'background',
-  'color',
-  'fontFamily',
-  'clipart',
-] as const;
-
-export type EditableField = (typeof EDITABLE_FIELDS)[number];
-
-export interface FlyerDiff {
-  changes: Array<{ field: EditableField | 'templateId'; from: unknown; to: unknown }>;
-  ghostDesign: FlyerDesign;
-}
+export type TextField = 'title' | 'subtitle' | 'dateLine';
+export type FillTarget = 'background' | 'text';
 
 export interface Variant {
   id: string;
@@ -41,20 +35,13 @@ export interface Variant {
   controller: AbortController;
 }
 
-export interface Order {
-  id: string;
-  copies: number;
-  pageSize: string;
-  design: FlyerDesign;
-}
+export type StoreEventType = 'design' | 'variants';
 
-export interface StoreSnapshot {
-  design: FlyerDesign;
-  variants: Variant[];
-  orders: Order[];
-  variantCounter: number;
-  orderCounter: number;
-}
+export type OpInput = { kind: string; params: Record<string, unknown> };
+
+export const FONT_OPTIONS = ['Georgia, serif', 'system-ui, sans-serif', 'Courier New, monospace'];
+export const CANVAS_W = 640;
+export const CANVAS_H = 400;
 
 const DEFAULT_DESIGN: FlyerDesign = {
   templateId: 'spring-market',
@@ -62,19 +49,17 @@ const DEFAULT_DESIGN: FlyerDesign = {
   subtitle: 'Local florists, bakers and makers — one day only',
   dateLine: 'May 9th · 10:00–18:00 · Main Street Plaza',
   background: '#fffdf8',
-  color: '#3f6d3a',
+  textColor: '#3f6d3a',
   fontFamily: 'Georgia, serif',
-  clipart: '✿',
+  logo: { x: 500, y: 40, size: 72 },
 };
-
-export type StoreEventType = 'design' | 'variants' | 'orders';
 
 export class AtelierStore {
   design: FlyerDesign = structuredClone(DEFAULT_DESIGN);
   variants: Variant[] = [];
-  orders: Order[] = [];
+  /** Bumped by EVERY mutation — feeds Redini's explicit stale guard. */
+  version = 0;
   variantCounter = 0;
-  orderCounter = 1000;
 
   private listeners = new Set<(type: StoreEventType) => void>();
 
@@ -87,61 +72,45 @@ export class AtelierStore {
     this.listeners.forEach((fn) => fn(type));
   }
 
-  /** Merges a partial edit input onto the current design. Only known string fields. */
-  applyEdit(input: Record<string, unknown>): FlyerDesign {
-    const ghost = this.ghostDesign(input);
-    if (typeof input.templateId === 'string') {
-      const t = templates.find((t) => t.id === input.templateId);
-      if (t) ghost.templateId = t.id;
+  private bump(): void {
+    this.version += 1;
+  }
+
+  // ---------- mutation vocabulary (each has an exact inverse) ----------
+
+  setText(field: TextField, value: string): void {
+    if (!['title', 'subtitle', 'dateLine'].includes(field)) {
+      throw new Error(`unknown text field "${field}"`);
     }
-    this.design = ghost;
+    this.design[field] = value;
+    this.bump();
     this.emit('design');
-    return structuredClone(this.design);
   }
 
-  applyTemplate(templateId: string): FlyerDesign {
-    const t = templates.find((t) => t.id === templateId);
-    if (!t) throw new Error(`unknown template "${templateId}"`);
-    this.design = {
-      ...this.design,
-      templateId: t.id,
-      background: t.design.background,
-      color: t.design.color,
-      fontFamily: t.design.fontFamily,
-    };
+  setFill(target: FillTarget, value: string): void {
+    if (target === 'background') this.design.background = value;
+    else if (target === 'text') this.design.textColor = value;
+    else throw new Error(`unknown fill target "${target}"`);
+    this.bump();
     this.emit('design');
-    return structuredClone(this.design);
   }
 
-  /** Field-level diff between the current design and a proposed edit. */
-  diffEdit(input: Record<string, unknown>): FlyerDiff['changes'] {
-    const changes: FlyerDiff['changes'] = [];
-    for (const field of EDITABLE_FIELDS) {
-      const to = input[field];
-      if (typeof to === 'string' && to !== this.design[field]) {
-        changes.push({ field, from: this.design[field], to });
-      }
-    }
-    return changes;
+  setFont(value: string): void {
+    this.design.fontFamily = value;
+    this.bump();
+    this.emit('design');
   }
 
-  /** The design as it WOULD be after the proposed edit — rendered as the on-canvas ghost. */
-  ghostDesign(input: Record<string, unknown>): FlyerDesign {
-    const ghost = structuredClone(this.design);
-    for (const field of EDITABLE_FIELDS) {
-      const to = input[field];
-      if (typeof to === 'string') (ghost as unknown as Record<string, unknown>)[field] = to;
-    }
-    if (typeof input.templateId === 'string') {
-      const t = templates.find((t) => t.id === input.templateId);
-      if (t) {
-        ghost.templateId = t.id;
-        ghost.background = t.design.background;
-        ghost.color = t.design.color;
-        ghost.fontFamily = t.design.fontFamily;
-      }
-    }
-    return ghost;
+  moveLogo(x: number, y: number): void {
+    this.design.logo = { ...this.design.logo, x, y };
+    this.bump();
+    this.emit('design');
+  }
+
+  resizeLogo(size: number): void {
+    this.design.logo = { ...this.design.logo, size };
+    this.bump();
+    this.emit('design');
   }
 
   createVariant(name?: string): Variant {
@@ -154,8 +123,18 @@ export class AtelierStore {
       controller: new AbortController(),
     };
     this.variants.push(v);
+    this.bump();
     this.emit('variants');
     return v;
+  }
+
+  removeVariant(id: string): void {
+    const v = this.variants.find((v) => v.id === id);
+    if (!v) throw new Error(`unknown variant "${id}"`);
+    v.controller.abort(); // unregisters its dynamic tool, if any
+    this.variants = this.variants.filter((x) => x.id !== id);
+    this.bump();
+    this.emit('variants');
   }
 
   selectVariant(id: string): FlyerDesign | null {
@@ -166,43 +145,42 @@ export class AtelierStore {
     return this.design;
   }
 
-  addOrder(copies: number, pageSize: string): Order {
-    this.orderCounter += 1;
-    const order: Order = {
-      id: `ORD-${this.orderCounter}`,
-      copies,
-      pageSize,
-      design: structuredClone(this.design),
-    };
-    this.orders.push(order);
-    this.emit('orders');
-    return order;
-  }
+  // ---------- preview (no mutation) ----------
 
-  snapshotAll(): StoreSnapshot {
-    return {
-      design: structuredClone(this.design),
-      variants: [...this.variants],
-      orders: [...this.orders],
-      variantCounter: this.variantCounter,
-      orderCounter: this.orderCounter,
-    };
-  }
-
-  restoreAll(s: StoreSnapshot): void {
-    // Abort controllers of variants that disappear with the rollback:
-    // their dynamically registered tools get unregistered too.
-    const keep = new Set(s.variants.map((v) => v.id));
-    for (const v of this.variants) {
-      if (!keep.has(v.id)) v.controller.abort();
+  /** Applies a subset of operations to a throw-away copy: the ghost. */
+  simulate(ops: OpInput[]): FlyerDesign {
+    const d = structuredClone(this.design);
+    for (const op of ops) {
+      const p = op.params;
+      switch (op.kind) {
+        case 'setText':
+          if (typeof p.field === 'string' && typeof p.value === 'string' && ['title', 'subtitle', 'dateLine'].includes(p.field)) {
+            d[p.field as TextField] = p.value;
+          }
+          break;
+        case 'setFill':
+          if (typeof p.value === 'string') {
+            if (p.target === 'background') d.background = p.value;
+            if (p.target === 'text') d.textColor = p.value;
+          }
+          break;
+        case 'setFont':
+          if (typeof p.value === 'string') d.fontFamily = p.value;
+          break;
+        case 'move':
+          if (typeof p.x === 'number' && typeof p.y === 'number') d.logo = { ...d.logo, x: p.x, y: p.y };
+          break;
+        case 'resize':
+          if (typeof p.size === 'number') d.logo = { ...d.logo, size: p.size };
+          break;
+        case 'addVariant':
+        case 'removeVariant':
+          // no visual change on the master canvas
+          break;
+        default:
+          break;
+      }
     }
-    this.design = structuredClone(s.design);
-    this.variants = [...s.variants];
-    this.orders = [...s.orders];
-    this.variantCounter = s.variantCounter;
-    this.orderCounter = s.orderCounter;
-    this.emit('design');
-    this.emit('variants');
-    this.emit('orders');
+    return d;
   }
 }

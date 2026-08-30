@@ -9,108 +9,132 @@ function setup() {
   const guard = createGuard({ ui });
   const store = new AtelierStore();
   registerAtelierTools(guard, store);
-  const propose = (tool: string, input: Record<string, unknown>): string => {
-    const p = guard.dispatch(tool, input) as Promise<unknown>;
+  const propose = (
+    intent: string,
+    operations: Array<{ kind: string; params: Record<string, unknown> }>,
+  ): string => {
+    const p = guard.dispatch('design_update', { intent, operations }) as Promise<unknown>;
     p.catch(() => {});
-    return ui.lastTransactionId();
+    return ui.lastChangeSetId();
   };
   return { guard, ui, store, propose };
 }
 
-describe('Atelier — transactional tools over Redini', () => {
-  it('edit_flyer preview: field-level diff + ghost design, nothing applied before commit', async () => {
+describe('Atelier — design_update ChangeSet over Redini', () => {
+  it('preview: simulate produces the ghost design; nothing touches the store before commit', async () => {
     const f = setup();
     const before = f.store.design.title;
-    const txId = f.propose('edit_flyer', { title: 'New Title', color: '#336699' });
+    const csId = f.propose('Make the title punchier', [
+      { kind: 'setText', params: { field: 'title', value: 'AI SUMMIT' } },
+      { kind: 'setFill', params: { target: 'background', value: '#FF0055' } },
+    ]);
 
-    const preview = f.ui.transactions.get(txId)!.preview;
-    expect(preview?.summary).toContain('2 change(s)');
-    const changes = (preview!.diff as { changes: Array<{ field: string }> }).changes;
-    expect(changes.map((c) => c.field).sort()).toEqual(['color', 'title']);
-    const ghost = (preview!.diff as { ghostDesign: { title: string; color: string } }).ghostDesign;
-    expect(ghost.title).toBe('New Title');
-    expect(ghost.color).toBe('#336699');
+    const preview = f.ui.changeSets.get(csId)!.preview;
+    const ghost = (preview!.diff as { appliedPreview: { title: string; background: string } }).appliedPreview;
+    expect(ghost.title).toBe('AI SUMMIT');
+    expect(ghost.background).toBe('#FF0055');
     expect(f.store.design.title).toBe(before); // staged, not applied
   });
 
-  it('edit_flyer commit applies only committed fields; audit records humanEdited', async () => {
+  it('amend + cherry-pick + atomic commit: receipt records the full negotiation', async () => {
     const f = setup();
-    const txId = f.propose('edit_flyer', { title: 'Agent Title', subtitle: 'Agent sub' });
-    await f.guard.commit(txId, { title: 'Human Title', subtitle: 'Agent sub' });
+    const csId = f.propose('Redesign the poster', [
+      { kind: 'setText', params: { field: 'title', value: 'AGENT TITLE' } },
+      { kind: 'setFill', params: { target: 'background', value: '#FF0055' } }, // will be amended
+      { kind: 'setFill', params: { target: 'text', value: '#FFFFFF' } }, // will be skipped
+      { kind: 'move', params: { x: 40, y: 40 } },
+    ]);
 
-    expect(f.store.design.title).toBe('Human Title');
-    expect(f.store.design.subtitle).toBe('Agent sub');
-    const audit = f.ui.audit.find((a) => a.kind === 'committed' && a.txId === txId);
-    expect(audit?.detail?.humanEdited).toBe(true);
+    // Human amends op-2, skips op-3, keeps op-1 and op-4.
+    f.guard.amendOperation(csId, 'op-2', { target: 'background', value: '#C90045' });
+    f.guard.toggleOperation(csId, 'op-3', false);
+    const receipt = await f.guard.commitChangeSet(csId);
+
+    expect(receipt.intended).toHaveLength(4);
+    expect(receipt.amended.map((r) => r.id)).toEqual(['op-2']);
+    expect(receipt.amended[0].params.value).toBe('#C90045');
+    expect(receipt.skippedByHuman.map((r) => r.id)).toEqual(['op-3']);
+    expect(receipt.applied).toEqual(['op-1', 'op-2', 'op-4']);
+
+    expect(f.store.design.title).toBe('AGENT TITLE');
+    expect(f.store.design.background).toBe('#C90045');
+    expect(f.store.design.textColor).not.toBe('#FFFFFF');
+    expect(f.store.design.logo.x).toBe(40);
   });
 
-  it('order_prints: commit creates the order; undo removes it (real-world action is reversible)', async () => {
+  it('addVariant op: commit registers a dynamic view tool; undo removes variant and unregisters it', async () => {
     const f = setup();
-    const txId = f.propose('order_prints', { copies: 50, pageSize: 'A4' });
-    const receipt = await f.guard.commit(txId);
-
-    expect(f.store.orders.length).toBe(1);
-    expect(f.store.orders[0].copies).toBe(50);
-    expect((receipt.stateAfter as { orders: unknown[] }).orders.length).toBe(1);
-
-    await f.guard.undo(receipt.undoToken);
-    expect(f.store.orders.length).toBe(0);
-  });
-
-  it('order_prints preview shows the exact design that would be printed', async () => {
-    const f = setup();
-    f.store.applyEdit({ title: 'Limited Edition' });
-    const txId = f.propose('order_prints', { copies: 25, pageSize: 'Letter' });
-    const preview = f.ui.transactions.get(txId)!.preview;
-    expect(preview?.summary).toContain('Limited Edition');
-    const ghost = (preview!.diff as { ghostDesign: { title: string } }).ghostDesign;
-    expect(ghost.title).toBe('Limited Edition');
-  });
-
-  it('create_variant: commit registers a dynamic select tool; undo unregisters it', async () => {
-    const f = setup();
-    f.store.applyEdit({ title: 'Dark Version Base' });
-    const txId = f.propose('create_variant', { name: 'Dark version' });
-    const receipt = await f.guard.commit(txId);
+    const csId = f.propose('Save this look as a variant', [
+      { kind: 'addVariant', params: { name: 'Dark version' } },
+    ]);
+    const receipt = await f.guard.commitChangeSet(csId);
 
     expect(f.store.variants.length).toBe(1);
-    const toolName = (await Promise.resolve(receipt)) && `select_variant_${f.store.variants[0].n}`;
-    const res = (await f.guard.dispatch(toolName, {})) as { design: { title: string } };
-    expect(res.design.title).toBe('Dark Version Base');
+    const toolName = `select_variant_${f.store.variants[0].n}`;
+    const view = (await f.guard.dispatch(toolName, {})) as { design: { title: string } };
+    expect(view.design.title).toBe(f.store.variants[0].design.title);
 
     await f.guard.undo(receipt.undoToken);
     expect(f.store.variants.length).toBe(0);
     await expect(f.guard.dispatch(toolName, {})).rejects.toMatchObject({ code: 'UNKNOWN_TOOL' });
   });
 
-  it('apply_template as human action: dispatch + commit applies the preset', async () => {
+  it('undo replays inverses across a multi-op ChangeSet: exact state restoration', async () => {
     const f = setup();
-    const txId = f.propose('apply_template', { templateId: 'evening-gala' });
-    await f.guard.commit(txId);
-    expect(f.store.design.background).toBe('#141420');
-    expect(f.store.design.color).toBe('#e8c46a');
-    expect(f.store.design.fontFamily).toBe('Georgia, serif');
+    const snapshotBefore = structuredClone(f.store.design);
+    const csId = f.propose('Remix everything', [
+      { kind: 'setText', params: { field: 'title', value: 'Remixed' } },
+      { kind: 'setFill', params: { target: 'background', value: '#141420' } },
+      { kind: 'setFont', params: { value: 'system-ui, sans-serif' } },
+      { kind: 'resize', params: { size: 140 } },
+    ]);
+    await f.guard.commitChangeSet(csId);
+    expect(f.store.design.title).toBe('Remixed');
+
+    const receipt = f.ui.receipts.at(-1)!;
+    await f.guard.undo(receipt.undoToken);
+    expect(f.store.design).toEqual(snapshotBefore);
   });
 
-  it('get_vendor_content: returns the untrusted vendor note (adversarial beat)', async () => {
+  it('stale guard on the store version: second ChangeSet proposed before the first commit goes stale', async () => {
+    const f = setup();
+    const p1 = f.guard.dispatch('design_update', {
+      intent: 'First',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'First' } }],
+    }) as Promise<unknown>;
+    const cs1 = f.ui.lastChangeSetId();
+    const p2 = f.guard.dispatch('design_update', {
+      intent: 'Second',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'Second' } }],
+    }) as Promise<unknown>;
+    const cs2 = f.ui.lastChangeSetId();
+
+    await f.guard.commitChangeSet(cs1);
+    await expect(f.guard.commitChangeSet(cs2)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(f.store.design.title).toBe('First');
+    void p1;
+    await p2;
+  });
+
+  it('get_vendor_content: untrusted note available for the adversarial demo (kept out of the video)', async () => {
     const f = setup();
     const res = (await f.guard.dispatch('get_vendor_content', { templateId: 'evening-gala' })) as {
       note: string;
     };
     expect(res.note).toContain('#141420');
-    expect(res.note).toContain('MUST'); // the injected instruction is there — for the human to see and decline
+    expect(res.note).toContain('MUST');
   });
 
-  it('edit_flyer on a state modified after proposal: STALE_TRANSACTION', async () => {
+  it('humanApply flow: a template is a 3-op ChangeSet committed instantly', async () => {
     const f = setup();
-    const p1 = f.guard.dispatch('edit_flyer', { title: 'A' }) as Promise<unknown>;
-    const tx1 = f.ui.lastTransactionId();
-    const p2 = f.guard.dispatch('edit_flyer', { title: 'B' }) as Promise<unknown>;
-    const tx2 = f.ui.lastTransactionId();
-
-    await f.guard.commit(tx1);
-    await expect(f.guard.commit(tx2)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
-    expect(await p2).toMatchObject({ status: 'stale_transaction' });
-    expect(await p1).toMatchObject({ status: 'committed' });
+    const csId = f.propose('Apply template "Evening Gala"', [
+      { kind: 'setFill', params: { target: 'background', value: '#141420' } },
+      { kind: 'setFill', params: { target: 'text', value: '#e8c46a' } },
+      { kind: 'setFont', params: { value: 'Georgia, serif' } },
+    ]);
+    const receipt = await f.guard.commitChangeSet(csId);
+    expect(f.store.design.background).toBe('#141420');
+    expect(f.store.design.textColor).toBe('#e8c46a');
+    expect(receipt.applied).toEqual(['op-1', 'op-2', 'op-3']);
   });
 });

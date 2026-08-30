@@ -1,24 +1,24 @@
 import type {
   AuditEntry,
+  ChangeSet,
+  ChangeSetReceipt,
   PreviewInfo,
-  Receipt,
-  Transaction,
   UIAdapter,
   UndoEvent,
 } from '../types';
 
 /** Minimal UI adapter for tests and headless usage: records everything. */
 export class InMemoryUI implements UIAdapter {
-  readonly transactions = new Map<string, { transaction: Transaction; preview: PreviewInfo | null }>();
-  readonly receipts: Receipt[] = [];
+  readonly changeSets = new Map<string, { changeset: ChangeSet; preview: PreviewInfo | null }>();
+  readonly receipts: ChangeSetReceipt[] = [];
   readonly undos: UndoEvent[] = [];
   readonly audit: AuditEntry[] = [];
 
-  onTransactionUpdated(tx: Transaction, preview: PreviewInfo | null): void {
-    this.transactions.set(tx.id, { transaction: structuredClone(tx), preview });
+  onChangesetUpdated(cs: ChangeSet, preview: PreviewInfo | null): void {
+    this.changeSets.set(cs.id, { changeset: structuredClone(cs), preview });
   }
 
-  onReceipt(receipt: Receipt): void {
+  onReceipt(receipt: ChangeSetReceipt): void {
     this.receipts.push(structuredClone(receipt));
   }
 
@@ -30,9 +30,9 @@ export class InMemoryUI implements UIAdapter {
     this.audit.push({ ...entry });
   }
 
-  lastTransactionId(): string {
-    const keys = [...this.transactions.keys()];
-    if (keys.length === 0) throw new Error('no transactions recorded');
+  lastChangeSetId(): string {
+    const keys = [...this.changeSets.keys()];
+    if (keys.length === 0) throw new Error('no ChangeSets recorded');
     return keys[keys.length - 1];
   }
 }

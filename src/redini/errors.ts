@@ -1,10 +1,12 @@
 export type RediniErrorCode =
   | 'UNKNOWN_TOOL'
-  | 'UNKNOWN_TRANSACTION'
+  | 'UNKNOWN_CHANGESET'
   | 'UNKNOWN_TOKEN'
   | 'ALREADY_DECIDED'
   | 'ALREADY_UNDONE'
-  | 'STALE_TRANSACTION';
+  | 'STALE_TRANSACTION'
+  | 'INVALID_OPERATION'
+  | 'EMPTY_CHANGESET';
 
 export class RediniError extends Error {
   readonly code: RediniErrorCode;

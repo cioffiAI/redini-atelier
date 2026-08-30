@@ -1,11 +1,17 @@
 import './styles.css';
 import { createGuard } from './redini/index';
 import { createDomPanel } from './redini/ui/dom-panel';
-import type { AuditEntry, PreviewInfo, Receipt, Transaction, UIAdapter, UndoEvent } from './redini/index';
+import type {
+  AuditEntry,
+  ChangeSetReceipt,
+  UIAdapter,
+  UndoEvent,
+} from './redini/index';
 import type { FlyerDesign } from './atelier/store';
 import { AtelierStore } from './atelier/store';
 import { registerAtelierTools } from './atelier/tools';
 import { initAtelierUI } from './atelier/ui';
+import { templates } from './atelier/templates';
 
 const statusEl = document.getElementById('webmcp-status')!;
 
@@ -19,7 +25,7 @@ function logEntry(text: string): void {
 // Demo mode: ?clean=1 hides human-only hints so the ONLY way for the agent to
 // mutate the design is the WebMCP tool path.
 if (new URLSearchParams(window.location.search).has('clean')) {
-  document.querySelectorAll('.spike-zone, .human-hint').forEach((el) => el.remove());
+  document.querySelectorAll('.human-hint').forEach((el) => el.remove());
 }
 
 const store = new AtelierStore();
@@ -30,8 +36,8 @@ function setGhost(ghost: FlyerDesign | null): void {
 }
 
 /**
- * Redini UI adapter: the DOM panel handles staging cards and the audit trail;
- * the canvas ghost shows proposals BEFORE they happen.
+ * Redini UI adapter: the DOM panel renders the ChangeSet negotiation cards and
+ * the receipts; the canvas ghost shows the proposed result BEFORE it happens.
  */
 const panel = createDomPanel({
   queueEl: document.getElementById('approval-queue')!,
@@ -40,12 +46,12 @@ const panel = createDomPanel({
 });
 
 const ui: UIAdapter & { bind?: (g: ReturnType<typeof createGuard>) => void } = {
-  onTransactionUpdated(tx: Transaction, preview: PreviewInfo | null): void {
-    panel.onTransactionUpdated(tx, preview);
-    const ghost = (preview?.diff as { ghostDesign?: FlyerDesign } | undefined)?.ghostDesign ?? null;
-    setGhost(tx.status === 'proposed' || tx.status === 'reviewing' ? ghost : null);
+  onChangesetUpdated(cs, preview) {
+    panel.onChangesetUpdated(cs, preview);
+    const ghost = (preview?.diff as { appliedPreview?: FlyerDesign } | undefined)?.appliedPreview ?? null;
+    setGhost(cs.status === 'proposed' || cs.status === 'reviewing' ? ghost : null);
   },
-  onReceipt(receipt: Receipt): void {
+  onReceipt(receipt: ChangeSetReceipt): void {
     panel.onReceipt(receipt);
   },
   onUndo(ev: UndoEvent): void {
@@ -55,7 +61,7 @@ const ui: UIAdapter & { bind?: (g: ReturnType<typeof createGuard>) => void } = {
   onAudit(entry: AuditEntry): void {
     panel.onAudit(entry);
   },
-  bind(g: ReturnType<typeof createGuard>): void {
+  bind(g) {
     panel.bind(g);
   },
 };
@@ -68,34 +74,22 @@ const guard = createGuard({ ui, modelContext: mc ?? null });
 registerAtelierTools(guard, store);
 
 atelierUi = initAtelierUI(store, (templateId) => {
-  // Human direct action: it still flows through a transaction (dispatch +
+  // Human direct action: even this flows through a ChangeSet (dispatch +
   // immediate commit), so the audit trail records everything and pending agent
-  // proposals correctly go stale.
-  const p = guard.dispatch('apply_template', { templateId }) as Promise<unknown>;
-  const txId = guard.getTransactions().at(-1)!.id;
+  // ChangeSets correctly go stale.
+  const t = templates.find((x) => x.id === templateId);
+  if (!t) return;
+  const p = guard.dispatch('design_update', {
+    intent: `Apply template "${t.name}"`,
+    operations: [
+      { kind: 'setFill', params: { target: 'background', value: t.design.background } },
+      { kind: 'setFill', params: { target: 'text', value: t.design.color } },
+      { kind: 'setFont', params: { value: t.design.fontFamily } },
+    ],
+  }) as Promise<unknown>;
+  const csId = guard.getChangeSets().at(-1)!.id;
   p.then((o) => logEntry(`human action: ${JSON.stringify(o)}`)).catch(() => {});
-  guard.commit(txId).catch((e: unknown) => logEntry(e instanceof Error ? e.message : String(e)));
-});
-
-// Declarative checkout (spec-native staging): the agent fills the form,
-// the human reviews and submits — always. No toolautosubmit.
-const checkoutForm = document.getElementById('checkout-form') as HTMLFormElement | null;
-checkoutForm?.addEventListener('submit', (e) => {
-  const ev = e as SubmitEvent & { agentInvoked?: boolean; respondWith?: (p: Promise<unknown>) => void };
-  e.preventDefault(); // the demo never navigates
-  const data = new FormData(checkoutForm);
-  const order = store.addOrder(Number(data.get('copies')), String(data.get('pageSize')));
-  logEntry(`order placed via checkout form: ${order.id} (${order.copies}×${order.pageSize})`);
-  if (ev.agentInvoked) {
-    ev.respondWith?.(
-      Promise.resolve({
-        status: 'ordered',
-        orderNumber: order.id,
-        copies: order.copies,
-        pageSize: order.pageSize,
-      }),
-    );
-  }
+  guard.commitChangeSet(csId).catch((e: unknown) => logEntry(e instanceof Error ? e.message : String(e)));
 });
 
 void (async (): Promise<void> => {

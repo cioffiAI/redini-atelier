@@ -71,7 +71,43 @@ main {
 .spike-zone form { display: flex; gap: 0.5rem; align-items: end; flex-wrap: wrap; }
 .spike-zone label { display: flex; flex-direction: column; font-size: 0.8rem; gap: 0.2rem; }
 .spike-zone input { padding: 0.35rem; border: 1px solid #ccc5b9; border-radius: 4px; }
-.spike-zone button { padding: 0.45rem 0.8rem; border: 1px solid #ccc5b9; border-radius: 4px; background: #f0ede6; cursor: pointer; }
+.powered { font-size: 0.78rem; color: #666; }
+
+.tagline { font-size: 0.78rem; color: #666; margin: 0 0 0.8rem; }
+.hint { font-weight: 400; font-size: 0.72rem; color: #888; }
+.hint-wide { font-size: 0.8rem; color: #556; background: #eef4ff; border: 1px solid #b9c9e8; border-radius: 6px; padding: 0.6rem 0.8rem; }
+
+#flyer-wrap { position: relative; }
+
+.flyer {
+  position: relative;
+  min-height: 380px;
+  height: 400px;
+  width: 100%;
+  max-width: 640px;
+  background: #fffdf8;
+  border: 1px solid #ddd8d0;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem;
+  overflow: hidden;
+}
+
+.logo-badge {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.9;
+}
+
+.flyer-text { position: relative; z-index: 1; }
 
 /* ---------- Atelier ---------- */
 
@@ -117,6 +153,7 @@ main {
   padding: 0.25rem 0.6rem;
   border-radius: 999px;
   letter-spacing: 0.03em;
+  z-index: 2;
 }
 .ghost-badge.hidden { display: none; }
 

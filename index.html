@@ -3,12 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Atelier — an agent-native design studio</title>
+    <title>Atelier — an agent-native design studio, powered by Redini</title>
     <link rel="stylesheet" href="./src/styles.css" />
   </head>
   <body>
     <header>
       <h1>Atelier</h1>
+      <span class="powered">powered by <strong>Redini</strong> — an editable ChangeSet for every agent action</span>
       <span id="webmcp-status" class="status">checking WebMCP…</span>
     </header>
     <main>
@@ -28,39 +29,17 @@
             <ul id="variants-list"><li class="empty">No variants yet</li></ul>
           </div>
         </div>
-        <section class="checkout">
-          <h3>Checkout — order prints</h3>
-          <p class="hint human-hint">Ask the agent to fill this for you, or fill it in yourself. Nothing is ordered until you press “Review &amp; order” — submission is always human (spec-native staging: the form has no <code>toolautosubmit</code>).</p>
-          <form
-            toolname="order_prints_form"
-            tooldescription="Spec-native checkout: proposes a print order of the current flyer design. The agent fills copies and page size; the human reviews and submits to confirm. Submission is always human."
-            id="checkout-form"
-          >
-            <label>Copies
-              <input name="copies" type="number" min="1" max="1000" value="10" required
-                     toolparamdescription="Number of copies to print (1-1000)">
-            </label>
-            <label>Paper
-              <select name="pageSize" required toolparamdescription="Paper size">
-                <option>A4</option>
-                <option>Letter</option>
-                <option>Legal</option>
-              </select>
-            </label>
-            <button type="submit">Review &amp; order</button>
-          </form>
-          <ul id="orders-list"><li class="empty">No orders yet</li></ul>
-        </section>
+        <p class="human-hint hint-wide">Try asking the agent: “Make this poster more minimal — change the title, soften the background color, move the logo to the top-left corner.” One intent becomes one editable ChangeSet: preview it, amend parameters, skip operations, commit the subset, undo everything.</p>
       </section>
       <aside id="guardrail-panel">
-        <h3>Redini — transaction control</h3>
-        <p class="tagline">Every agent mutation is a staged transaction: inspect it, edit it, commit or decline it. Everything is reversible.</p>
+        <h3>Redini — ChangeSet negotiation</h3>
+        <p class="tagline">One agent intent → one editable ChangeSet. Preview, amend, cherry-pick, commit atomically, undo deterministically.</p>
         <div id="approval-queue">
           <p class="empty">No pending agent actions.</p>
         </div>
         <h4>Audit trail</h4>
         <ul id="activity-log"></ul>
-        <button id="undo-btn" disabled>Undo last committed transaction</button>
+        <button id="undo-btn" disabled>Undo last committed ChangeSet</button>
       </aside>
     </main>
     <script type="module" src="./src/main.ts"></script>
