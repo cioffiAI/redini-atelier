@@ -1,5 +1,7 @@
 # Atelier — an agent-native design studio, powered by Redini
 
+**Live demo:** https://redini-atelier.netlify.app
+
 **Atelier** is a WebMCP design editor where agent actions arrive as **editable ChangeSets** rather than silent mutations. One agent intent can produce multiple proposed operations. Before application state changes, the person can **preview the proposal, amend individual parameters, skip individual operations** and **commit the accepted subset**.
 
 **Redini** is the small transaction layer underneath.
