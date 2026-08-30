@@ -17,20 +17,22 @@ Ipotesi: ~8-10 ore/giorno di lavoro effettivo. Ogni giorno ha un criterio di "fa
 
 **Fatto quando**: un tool gira davvero nel browser di ChatGPT sul sito deployato su Netlify, tabella spike compilata.
 
-### Giorno 2 — 30/08: il cuore (libreria redini)
-- [ ] `registerGuardedTool()` con mode safe/approval-required
-- [ ] Coda approvazione (UI panel: card con Approva/Modifica/Rifiuta)
-- [ ] SnapshotStore + undo funzionante
-- [ ] Log attività
-- [ ] Test manuale: agente chiama un tool mutante → coda → approvazione → esecuzione
+### Giorno 2 — 30/08: il cuore (libreria redini, semantica transazionale)
+- [ ] `registerGuardedTool()` con mode safe/transaction (args = stringa JSON: firma Chrome verificata)
+- [ ] Staging area (card con descrizione umana, parametri editabili, Commit/Modifica/Rifiuta)
+- [ ] Receipts (txId, undoToken) + SnapshotStore + rollback funzionante
+- [ ] Provenance / audit trail
+- [ ] Test: agente propone → commit; propone → edit → commit; propone → decline; rollback
 
-**Fatto quando**: l'agente propone un'azione, l'utente la approva, l'undo la annulla.
+**Fatto quando**: le quattro vie (commit / modifica+commit / rifiuto / rollback) producono receipt coerenti nell'audit trail.
 
 ### Giorno 3 — 31/08: Atelier (l'app)
 - [ ] Canvas flyer con i 6 campi + 4 template mock
-- [ ] Tutti i 6 tool imperativi registrati (con tool dinamici per le varianti)
-- [ ] Form dichiarativo checkout (o fallback F1 se lo spike ha bocciato la declarative)
-- [ ] UI guardrail integrata e presentabile
+- [ ] Tutti i tool imperativi registrati come transazioni (varianti dinamiche incluse)
+- [ ] Checkout dichiarativo (VERIFICATO nello spike: senza `toolautosubmit` il form resta pending per la revisione umana — è una transazione nativa)
+- [ ] Preview/diff prima/dopo nella card di staging
+- [ ] Caso avversario: `get_vendor_content` con testo iniettato → proposta indesiderata → decline
+- [ ] UI redini integrata e presentabile
 
 **Fatto quando**: flusso completo dimostrabile: template → modifiche approvate → varianti → checkout rivisto dall'utente.
 
@@ -43,7 +45,7 @@ Ipotesi: ~8-10 ore/giorno di lavoro effettivo. Ogni giorno ha un criterio di "fa
 **Fatto quando**: un estraneo clona il repo, segue il README e fa girare tutto.
 
 ### Giorno 5 — 02/09: video + submission (MARGINE: resta il 3/09 solo per emergenze)
-- [ ] Script del video (< 3 min): problema (20s) → demo flusso agente+approvazione (90s) → undo e form (40s) → perché conta / libreria riusabile (30s)
+- [ ] Script del video (< 3 min, UNO scenario continuo): richiesta ("prepara una locandina per...") → l'agente trova il template via WebMCP → 3 proposte in staging: 1 commessa, 1 modificata poi commessa, 1 rifiutata → l'agente continua senza perdere contesto → undo → caso avversario (iniezione vendor, rifiuto) → "ordina 50 copie" → barriera massima + ricevuta finale (150s) → claim libreria riusabile (20s)
 - [ ] Registrazione con audio chiaro (schermo + voce), niente musica coperta da copyright
 - [ ] Upload YouTube pubblico
 - [ ] Testo submission in inglese (4 punti richiesti dalle regole)

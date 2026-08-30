@@ -111,8 +111,8 @@ async function bootstrap(): Promise<void> {
   testForm?.addEventListener('submit', (e) => {
     const ev = e as SubmitEvent & { agentInvoked?: boolean; respondWith?: (p: Promise<unknown>) => void };
     logEntry(`test-form submit — agentInvoked: ${ev.agentInvoked === true}`);
+    e.preventDefault(); // spike: never navigate
     if (ev.agentInvoked) {
-      e.preventDefault();
       const data = new FormData(testForm);
       ev.respondWith?.(
         Promise.resolve({

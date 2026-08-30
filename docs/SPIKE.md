@@ -82,12 +82,14 @@ Setup: tool `temp_echo` registrato con signal; un tool `dispose_temp` che chiama
 
 | Test | ChatGPT in-app browser | Chrome 149+ flag | Decisione |
 |---|---|---|---|
-| 1 Pipeline base | ☐ | ☐ | — |
-| 2 Timeout attesa umana (durata?) | ☐ | ☐ | ☐ approvazione bloccante ☐ ack pending |
-| 3 Form dichiarativo compilato | ☐ | ☐ | ☐ declarative ☐ fallback F1 |
-| 4 respondWith | ☐ | ☐ | ☐ conferma strutturata ☐ fallback F2 |
-| 5 tool dinamici + toolchange | ☐ | ☐ | ☐ varianti dinamiche ☐ statiche |
-| 6 AbortController | ☐ | ☐ | ☐ deregistrazione pulita |
+| 1 Pipeline base | ☐ (da fare con agente reale) | ✅ PASS (automatizzato) | — |
+| 2 Timeout attesa umana (durata?) | ☐ | ✅ promessa viva >90s, risolta al resolve | ☑ approvazione bloccante |
+| 3 Form dichiarativo compilato | ☐ | ✅ campi riempiti + tool pending | ☑ declarative |
+| 4 respondWith | ☐ | ✅ submit umano chiude il tool con `{status:'booked'}`; `agentInvoked:true` | ☑ conferma strutturata |
+| 5 tool dinamici + toolchange | ☐ | ✅ read_note_1 registrato + 1 evento | ☑ varianti dinamiche |
+| 6 AbortController | ☐ | ✅ temp_echo rimosso | ☑ deregistrazione pulita |
+
+Nota firma: `executeTool(tool, args)` richiede **args come STRINGA JSON** (oggetti → "Failed to parse input arguments"). Script: `scripts/spike-auto.mjs`. Residuo: ripetere i test col browser in-app di ChatGPT (agente reale, ~10 min, prompt già pronti qui sopra).
 
 La MINIMA barriera di partenza è il Test 1 su almeno uno dei due browser. Tutto il resto ha fallback.
 

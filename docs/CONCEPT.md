@@ -1,90 +1,93 @@
 # CONCEPT — "Redini" (nome di lavoro)
-> Un layer di fiducia Human-in-the-Loop per il web agent-native, dimostrato con uno studio di design.
+> Transaction layer for agentic web actions — dimostrato da Atelier, studio di design agent-native.
 
-Stato: BOZZA v0.1 — 29/08/2026
-Regole di riferimento: Official Rules "The WebMCP Challenge" (webmcp.devpost.com) — deadline 3 set 2026, 22:00 ora italiana.
+Stato: BOZZA v0.2 — 29/08/2026 (pivot di posizionamento dal "consent wrapper" alla transaction layer)
+Regole di riferimento: Official Rules "The WebMCP Challenge" (webmcp.devpost.com) — deadline 3 set 2026, 13:00 PDT (22:00 ora italiana). Prem premi: $35.000 cash totali, 10 vincitori × $3.500 cash ($3.000 OpenAI + $500 Netlify) + crediti/gear.
 
 ---
 
 ## 1. Tesi in una frase
 
-Gli agenti sul web oggi sono potenti ma **non affidabili**: il collo di bottiglia dell'adozione non è la capacità dell'agente, è la **fiducia dell'utente**. "Redini" è il livello che mancava tra l'agente e l'utente: approvazione prima delle azioni mutanti, reversibilità totale, visibilità completa — come libreria aperta riusabile da qualsiasi sito WebMCP, dimostrata dentro un'app prodotto completa.
+**Agents shouldn't directly mutate your web app. They should propose transactions humans can inspect, modify, commit, and reverse.**
 
-## 2. Il problema (perché esiste questo progetto)
+Redini è una transaction layer per le azioni agentiche sul web: ogni mutazione richiesta da un agente diventa una transazione in staging — con anteprima del diff, parametri modificabili dall'umano, commit che produce una ricevuta, e rollback. L'agente mantiene l'iniziativa; l'utente mantiene il controllo dello stato.
 
-### 2.1 Il punto cieco della spec
-La spec WebMCP ha un capitolo "Open Questions" esplicito. Due issue sono dedicate esattamente a questo:
+## 2. Perché questo claim (e non quello vecchio)
 
-- **Issue #165 / #50 — "User prompting and elicitation"**: come può un tool chiedere conferma all'utente quando serve autorizzazione esplicita? La spec elenca due strade (delegare all'agente/harness, oppure un dialogo nativo del browser fuori dal loop dell'agente) ma **non ne implementa nessuna**. È terreno aperto.
-- La API dichiarativa ha già un embrione di risposta (form senza `toolautosubmit` → l'utente rivede e invia), ma solo per i form. Per i tool imperativi mutanti non esiste nulla.
+### 2.1 La falsificazione che ha costretto il pivot
+Il claim originale — "human approval per WebMCP" — è stato verificato e **risulta già occupato**:
+- `@mcptrail/webmcp-consent` (npm, v0.1.0): wrapping della registrazione WebMCP con policy `auto/confirm/deny` e modal di approvazione. **Confermato esistente** (verificato il 29/08/2026).
+- Pattern `readOnlyHint` per letture automatiche + `confirm()` per le scritture: già usato da agent GUI esistenti.
+- Il flag `annotations.readOnlyHint` esiste già nella stessa spec WebMCP: la distinzione safe/mutante da sola è tabella, non innovazione.
 
-Nessun progetto nell'ecosistema (starter, showcase, demo indicizzati su GitHub) affronta sistematicamente il tema: i demo eseguono le azioni dell'agente e basta.
+### 2.2 Il claim nuovo e la sua difendibilità
+L'approvazione è solo un pezzo. L'unità di Redini è la **transazione agentica**:
 
-### 2.2 Il problema per l'utente finale (Human-in-the-loop)
-Chi userà app WebMCP nella vita reale avrà tre paure:
-1. "L'agente ha fatto qualcosa che non volevo" (azioni irreversibili).
-2. "Non so cosa stia facendo adesso" (opacità).
-3. "Non posso correggerlo" (assenza di override).
+```
+agent intent → proposed mutation → visual preview/diff → human edit → commit → receipt → undo
+```
 
-Redini risponde con tre garanzie, una per paura:
-1. **Approvazione**: le azioni mutanti non si eseguono da sole; entrano in una coda con anteprima.
-2. **Trasparenza**: ogni chiamata di tool è tracciata in un log visibile.
-3. **Reversibilità**: ogni azione approvata è annullabile (snapshot + undo).
+La combinazione — **live visual collaboration + staged transactions + editable approval + rollback + audit trail** — è ciò che i confirmation gate esistenti NON hanno:
+- **Editable approval**: l'umano modifica i parametri della proposta prima del commit (il gate esistente dice solo sì/no).
+- **Visual preview/diff**: il cambiamento proposto si vede sul prodotto reale prima di accaderlo (nel nostro caso: la locandina prima/dopo), non è un modal astratto.
+- **Receipts**: ogni commit produce una ricevuta strutturata (id, cambiamenti, timestamp, undo token) — tracciabilità a livello di transazione, non di log.
+- **Rollback nativo**: lo snapshot/undo è parte della transazione, non un'afterthought.
+- **Provenance**: audit trail completo di chi ha proposto cosa, cosa l'umano ha cambiato nella proposta, esito.
 
-## 3. Principi di design
+## 3. Posizionamento onesto (NO security theater)
+
+Redini **gira nella pagina**: un'app malevola o compromessa può aggirare un controllo client-side. Quindi:
+- ❌ NON presentiamo Redini come "rende sicuro WebMCP" o "security boundary".
+- ✅ Presentiamo Redini come **human control, recoverability, auditable mutations**: l'utente vede, decide, corregge e torna indietro. Autorizzazione e validazione vere restano server-side (dove devono stare).
+- Valore aggiunto: Redini riduce anche il blast radius di **content injection** (un contenuto non affidabile che induce l'agente a mutazioni non richieste): la mutazione resta una proposta ispezionabile, non diventa automaticamente stato dell'app. Un caso avversario in demo lo dimostra.
+
+## 4. Principi di design
 
 | Principio | Regola concreta |
 |---|---|
-| Leggere è gratis, agire si approva | Tool read-only (`isSafe: true`) girano senza conferma; tool mutanti passano dalla coda di approvazione |
-| L'utente è il boss, l'agente propone | L'utente può approvare, modificare i parametri prima dell'ok, rifiutare |
-| Tutto è reversibile | Ogni azione mutante fa uno snapshot prima di eseguire; undo stack illimitato nella sessione |
-| Il form è un checkpoint naturale | I form dichiarativi senza `toolautosubmit` sono il punto di revisione per eccellenza; la UI li evidenzia quando l'agente li riempie |
-| L'agente resta utile | Il guardrail non blocca l'agente: gli risponde sempre (accettato/rifiutato/modificato) così la conversazione continua |
+| Leggere è gratis, mutare è una transazione | Tool read-only (`readOnlyHint`) girano subito; le mutazioni entrano in staging |
+| L'umano modifica la proposta, non solo la approva | Ogni transazione in staging è editabile nei parametri prima del commit |
+| Vedi prima che accada | Preview del diff sul prodotto reale (prima/dopo) dentro la card di staging |
+| Tutto ciò che si commetta ha una ricevuta | Receipt strutturata: id, cambiamenti, timestamp, undo token |
+| Tutto ciò che si commetta è reversibile | Rollback con un click; la ricevuta lo riferisce nell'audit trail |
+| L'agente non perde il filo | Ogni proposta riceve risposta strutturata (committed / modified / declined) — la collaborazione continua |
 
-## 4. Cosa consegna il progetto
+## 5. Cosa consegna il progetto
 
-1. **`redini/`** — libreria aperta (~400-600 righe, zero dipendenze) che avvolge `document.modelContext`:
-   - `registerGuardedTool()` con policy `safe` / `approval-required`
-   - Coda di approvazione con anteprima e modifica parametri
-   - Snapshot/undo automatico per azioni mutanti
-   - Log attività leggibile
-2. **App demo: "Atelier"** — studio di design di un flyer/locandina:
-   - L'agente cerca template, propone modifiche (titolo, colori, font, layout), crea varianti — ogni modifica passa dall'approvazione con anteprima
-   - Checkout stampa con form dichiarativo rivisto dall'utente
-   - Undo: "annulla le ultime modifiche dell'agente"
-3. **Documentazione**: README del pattern, esempi riuso, nota su come il pattern risolve gli issue aperti #165/#50 (con link alla spec).
+1. **`redini/`** — libreria open source (~500-700 righe, zero dipendenze):
+   - `registerGuardedTool()` con `mode: 'safe' | 'transaction'`
+   - Staging area: transazioni proposte con preview/diff e parametri editabili
+   - Commit → Receipt `{ txId, tool, input, result, timestamp, undoToken }`
+   - Rollback via snapshot store; activity log = provenance
+2. **Atelier** — studio di design agent-native dove il workflow è:
+   template → l'agente propone 3 mutazioni → l'umano ne commetta una, ne modifica una, ne rifiuta una → l'agente continua senza perdere contesto → undo → **order_prints** (barriera massima: revisione esplicita del design esatto che verrà stampato, ricevuta finale)
+3. **Un caso avversario**: un contenuto di vendor non affidabile induce l'agente a proporre una mutazione non richiesta → Redini mostra che resta una proposta in staging, l'umano la rifiuta con un click.
 
-## 5. Posizionamento rispetto alle altre submission
+## 6. Atelier: perché è il dimostratore giusto
 
-Con 3.635 partecipanti, la maggior parte farà l'app verticale (shop, travel, CRM). Tre categorie attese:
-- "Ho aggiunto tool WebMCP a una todo-app" — banale, eliminabile.
-- "App verticale ben fatta" — buona esecuzione, poca novità.
-- "Ho capito qualcosa del protocollo che altri non hanno capito" — rara.
+Un todo-list o un CRM renderebbero Redini una demo CRUD tra mille. In un **editor visuale**:
+- Le mutazioni sono visibili (diff reale, non descrizione astratta).
+- La collaborazione umano-agente è naturale ("rendilo più minimal" → proposta → correzione "blu → verde").
+- L'ultima azione — **ordinare la stampa** — è un'azione reale, costosa, diversa dalle precedenti: giustifica la barriera di commit più forte e chiude la storia.
+- È il caso d'uso flagship della stessa spec WebMCP (Jen e il flyer): i giudici lo riconoscono.
 
-Redini sta nella terza categoria con un prodotto della seconda: **novità a livello protocollo + esecuzione prodotto completa**. È la combinazione che i criteri premiano esplicitamente (Creativity & Ambition + Execution insieme).
+## 7. Mappatura ai 4 criteri di giudizio (stima post-pivot)
 
-Giudici particolarmente sensibili a questo taglio:
-- **Alex Nahas** (creatore di MCP-B): il progetto dialoga con l'evoluzione del protocollo.
-- **Justin Rushing** (Browser Platform Lead, OpenAI): il punto di conferma utente è esattamente il problema di chi costruisce il browser agent.
-- **Sarah Drasner** (Chrome): la spec è guidata da Google; affrontare una sua open question è il miglior complimento possibile.
-
-## 6. Risposta ai 4 criteri di giudizio
-
-| Criterio | Come Redini lo soddisfa | Rischio residuo |
+| Criterio | Come Redini lo soddisfa | Stima |
 |---|---|---|
-| WebMCP Leverage | Usa l'intera superficie API: registerTool + signal, tool dinamici, toolchange, isSafe, form dichiarativi (toolname/toolparamdescription/respondWith), AbortSignal, getTools/executeTool | Se la declarative API non è supportata nei browser di test, va coperta con fallback (vedi TECH-DESIGN §7) |
-| Execution | Atelier è un prodotto completo e usabile, non un PoC: design reale, checkout, undo, stato persistente in sessione | Il rischio n.1 è scope creep: l'editor di design DEVE restare semplice |
-| Potential Impact | Il problema della fiducia è reale e crescente; la libreria è riusabile da ogni sito WebMCP; il pattern risponde a issue aperti della spec | Va raccontato bene nel testo/video, non è autoevidente |
-| Creativity & Ambition | Nessun concorrente atteso fa un trust layer; affronta una open question della spec | I giudici potrebbero preferire l'impatto verticale puro: il checkout/stampa dà proprio quella dimensione |
+| WebMCP Leverage | Tutta la superficie API: registerTool, dynamic tools, toolchange, readOnlyHint, declarative form (schema synthesis verificata in Chrome!), respondWith, AbortSignal, blocking execute verificato >90s | 8.5/10 |
+| Execution | Atelier come prodotto rifinito (non playground): flusso completo con checkout reale | 8/10 (se il polish è curato) |
+| Potential Impact | Le mutazioni agentiche sono il collo di bottiglia dell'adozione; libreria riusabile da qualsiasi app WebMCP | 7.5/10 |
+| Creativity & Ambition | Da 5.5-6/10 col claim "approval" (già occupato) a 8-8.5/10 col claim "transactional human control": inspect/edit/commit/rollback vs popup "Allow?" | 8-8.5/10 |
 
-## 7. Cosa impari (obiettivo personale dichiarato)
+## 8. Cosa impari (obiettivo personale)
 
-Costruire Redini ti obbliga a toccare praticamente ogni angolo della API: registrazione e deregistrazione dinamica, validazione inputSchema, eventi toolchange, API dichiarativa dei form, segnali di abort, pattern read-only/mutanti. È il percorso di apprendimento più completo possibile in un singolo progetto.
+Costruire una transaction layer obbliga a dominare: lifecycle dei tool, blocking execute e timeout, API dichiarativa dei form (che È già una transazione in staging nativa — la spec lo conferma con `:tool-form-active`), AbortSignal, schema synthesis, e design di API con semantica transazionale. Più la disciplina di verificare le assunzioni su terra reale (lo spike ha già corretto due assunzioni: firma JSON-string di executeTool, attesa illimitata delle promesse).
 
-## 8. Criteri di successo della submission
+## 9. Criteri di successo
 
-1. Funziona nel browser in-app di ChatGPT E in Chrome 149+ con flag, senza errori in console.
-2. Nel video: l'agente propone → l'utente approva/modifica/rifiuta → undo funziona. Tre momenti chiari.
-3. La libreria è importabile in un altro progetto con un copia-incolla.
-4. Repo pubblico, licenza MIT visibile, README che spiega il pattern in 30 secondi.
-5. Tutto consegnato entro le 22:00 italiane del 3 settembre, con margine (obiettivo: pronto il 2 settembre).
+1. Funziona nel browser in-app di ChatGPT E in Chrome 149+ (flag), senza errori in console.
+2. Nel video, UN solo scenario continuo < 3 min: richiesta iniziale → 3 proposte in staging (commit / edit+commit / decline) → l'agente continua → undo → caso avversario → checkout stampa con ricevuta.
+3. La libreria è copiabile in un altro progetto; il README spiega il pattern in 30 secondi.
+4. Repo pubblico, MIT, distintivo in About.
+5. Tutto consegnato entro le 22:00 italiane del 3 settembre — target: pronto il 2 settembre.
