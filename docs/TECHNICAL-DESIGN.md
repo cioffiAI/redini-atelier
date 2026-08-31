@@ -62,7 +62,7 @@ deterministic UNDO/REDO (editor-style history: undoStack/redoStack, inverse oper
 `proposed → reviewing → committed | declined | cancelled | stale | failed | undone | undo_failed`
 
 - `proposed` just staged; `reviewing` after the first human interaction (amend/toggle).
-- `cancelled` when the WebMCP invocation is aborted (AbortSignal): it is a visible TERMINAL outcome; the UI receives `emitUpdate`, the agent's promise unblocks exactly once with `status: 'cancelled'`.
+- `cancelled` on either AbortSignal: the WebMCP **invocation** being aborted (`detail.reason: 'agent_aborted'`), or the tool's **registration** being aborted, which unregisters it and retracts every proposal still open on it (`detail.reason: 'tool_unregistered'`). Both are a visible TERMINAL outcome; the UI receives `emitUpdate` and the agent's promise unblocks exactly once with `status: 'cancelled'`. Removing a tool never leaves a pending ChangeSet behind: an orphan would read committable while `commitChangeSet` could only throw `UNKNOWN_TOOL`, stranding the agent's promise forever.
 - `stale` when the app state changed between the proposal and the commit (see §5).
 - `failed` when the commit fails halfway (with rollback attempted, §6).
 - `undo_failed` when the replay of the inverses fails (§7).

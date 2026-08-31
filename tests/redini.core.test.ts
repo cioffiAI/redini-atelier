@@ -1434,22 +1434,129 @@ describe('Redini v3 — ChangeSet gates', () => {
     expect(state.title).toBe('Hello');
   });
 
-  it('48. an ALREADY-aborted registration signal never leaves the tool registered', () => {
+  it('48. an ALREADY-aborted registration signal is refused by BOTH registries, never half-registered', async () => {
     const ui = new InMemoryUI();
-    const guard = createGuard({ ui });
+    const hostTools: string[] = [];
+    const modelContext: ModelContextLike = {
+      registerTool: (tool: { name: string }) => {
+        hostTools.push(tool.name);
+        return { unregister: () => {} };
+      },
+    } as unknown as ModelContextLike;
+    const guard = createGuard({ ui, modelContext });
     const ac = new AbortController();
     ac.abort();
+
     guard.registerChangeSetTool({
       name: 'stillborn',
       description: 'Registered with a signal that is already aborted.',
       kinds: ['setText'],
       runtime: { apply: (op) => op, simulate: () => ({}) },
     }, { signal: ac.signal });
-    // Listening for 'abort' on an already-aborted signal never fires, so this
-    // used to stay registered forever.
-    expect(() => guard.amendOperation('nope', 'op-1', {})).toThrowError(/UNKNOWN_CHANGESET/);
-    return expect(
+    guard.registerSafeTool({
+      name: 'stillborn_safe',
+      description: 'Same, read-only.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: () => ({}),
+    }, { signal: ac.signal });
+
+    // 'abort' never fires again for a spent signal, so registering and THEN
+    // listening left the host advertising a tool the guard had dropped. Both
+    // registries must simply refuse it.
+    expect(hostTools).toEqual([]);
+    await expect(
       guard.dispatch('stillborn', { intent: 'x', operations: [{ kind: 'setText', params: { value: 'y' } }] }),
     ).rejects.toMatchObject({ code: 'UNKNOWN_TOOL' });
+    await expect(guard.dispatch('stillborn_safe', {})).rejects.toMatchObject({ code: 'UNKNOWN_TOOL' });
+  });
+
+  it('49. a host adapter that tears the tool down FROM onChangesetUpdated still settles the agent (no null-resolver strand)', async () => {
+    const rec = new InMemoryUI();
+    const ac = new AbortController();
+    const state = { title: 'Hello', version: 0 };
+    let fired = false;
+    // The teardown lands DURING dispatch's staging window, before the promise
+    // executor would have assigned cs.resolve. settle() used to burn cs.settled
+    // against a null resolver: card terminally 'cancelled', agent hung forever,
+    // every recovery path short-circuiting on that same flag.
+    const ui = {
+      onChangesetUpdated(cs: Parameters<InMemoryUI['onChangesetUpdated']>[0], pv: Parameters<InMemoryUI['onChangesetUpdated']>[1]) {
+        rec.onChangesetUpdated(cs, pv);
+        if (!fired && cs.status === 'proposed') {
+          fired = true;
+          ac.abort();
+        }
+      },
+      onReceipt: (r: Parameters<InMemoryUI['onReceipt']>[0]) => rec.onReceipt(r),
+      onUndo: (e: Parameters<InMemoryUI['onUndo']>[0]) => rec.onUndo(e),
+      onRedo: (e: Parameters<InMemoryUI['onRedo']>[0]) => rec.onRedo(e),
+      onAudit: (e: Parameters<InMemoryUI['onAudit']>[0]) => rec.onAudit(e),
+    };
+    const guard = createGuard({ ui });
+    guard.registerChangeSetTool({
+      name: 'reentrant',
+      description: 'Torn down re-entrantly from the first emit.',
+      kinds: ['setText'],
+      getStateVersion: () => state.version,
+      runtime: {
+        apply(op) {
+          const prev = state.title;
+          state.title = String(op.params.value);
+          state.version += 1;
+          return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+        },
+        simulate: (ops) => ({ title: String(ops.at(-1)?.params.value ?? state.title) }),
+      },
+    }, { signal: ac.signal });
+
+    const p = guard.dispatch('reentrant', {
+      intent: 'staged while its tool is torn down',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'NEW' } }],
+    }) as Promise<AgentOutcome>;
+    p.catch(() => {});
+
+    const settled = await Promise.race([p, new Promise((r) => setTimeout(() => r('HUNG'), 100))]);
+    expect(settled).not.toBe('HUNG');
+    expect(settled).toMatchObject({ status: 'cancelled' });
+    expect(fired).toBe(true);
+    expect(state.title).toBe('Hello');
+  });
+
+  it('50. a stale registration signal cannot retract a proposal belonging to the registration that replaced it', async () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const state = { title: 'Hello', version: 0 };
+    const runtime: OperationRuntime = {
+      apply(op) {
+        const prev = state.title;
+        state.title = String(op.params.value);
+        state.version += 1;
+        return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+      },
+      simulate: (ops) => ({ title: String(ops.at(-1)?.params.value ?? state.title) }),
+    };
+    const a = new AbortController();
+    const b = new AbortController();
+    const def = { description: 'Re-registered under the same name.', kinds: ['setText'], runtime, getStateVersion: () => state.version };
+    guard.registerChangeSetTool({ name: 'twice', ...def }, { signal: a.signal });
+    guard.registerChangeSetTool({ name: 'twice', ...def }, { signal: b.signal });
+
+    const p = guard.dispatch('twice', {
+      intent: 'staged under registration B',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'FROM_B' } }],
+    }) as Promise<AgentOutcome>;
+    p.catch(() => {});
+    const csId = ui.lastChangeSetId();
+
+    // A's listener must recognise that it no longer owns the name. Without the
+    // identity check it deleted B's live registration AND force-cancelled a
+    // negotiation nobody aborted, lying to human and agent at once.
+    a.abort();
+    expect(b.signal.aborted).toBe(false);
+    expect(ui.changeSets.get(csId)?.changeset.status).toBe('proposed');
+
+    await expect(guard.commitChangeSet(csId)).resolves.toBeTruthy();
+    expect(state.title).toBe('FROM_B');
+    expect(await p).toMatchObject({ status: 'committed', appliedCount: 1 });
   });
 });

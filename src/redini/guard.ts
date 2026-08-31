@@ -98,6 +98,17 @@ function defaultInputSchema(kinds: string[]): object {
   };
 }
 
+/**
+ * A registration whose signal is ALREADY aborted is dead on arrival, and it
+ * must never reach the host registry: 'abort' never fires again for a spent
+ * signal, so the host would advertise a tool forever that the guard does not
+ * know about — the exact registry asymmetry the abort teardown exists to
+ * prevent. Refusing the registration outright keeps both sides agreeing.
+ */
+function registrationIsSpent(options?: { signal?: AbortSignal }): boolean {
+  return options?.signal?.aborted === true;
+}
+
 function toMcpResult(outcome: AgentOutcome): AgentOutcome {
   // FIX I: direct structured serialization — the execute callback returns this
   // object as-is; no `{content:[{type:'text',...}]}` envelope.
@@ -144,6 +155,7 @@ export class RediniGuard {
   }
 
   registerSafeTool(def: SafeToolDefinition, options?: { signal?: AbortSignal }): void {
+    if (registrationIsSpent(options)) return;
     this.registrations.set(def.name, { kind: 'safe', def });
     this.mcp?.registerTool(
       {
@@ -163,6 +175,7 @@ export class RediniGuard {
   }
 
   registerChangeSetTool(def: ChangeSetToolDefinition, options?: { signal?: AbortSignal }): void {
+    if (registrationIsSpent(options)) return;
     this.registrations.set(def.name, { kind: 'changeset', def });
     this.mcp?.registerTool(
       {
@@ -265,19 +278,27 @@ export class RediniGuard {
       resolve: null,
       settled: false,
     };
+    // The resolver MUST exist BEFORE the ChangeSet is published. Publishing it
+    // makes it reachable by the teardown sweep and by re-entrant host code
+    // (onChangesetUpdated and onAudit below are app callbacks), and settle()
+    // against a null resolver would burn cs.settled while nothing ever resolves
+    // the agent promise: stranded, with every recovery path short-circuiting on
+    // that same flag. Assigning it first removes the window instead of guarding
+    // it.
+    const outcome = new Promise<AgentOutcome>((resolve) => {
+      cs.resolve = resolve;
+    });
     this.changeSets.set(cs.id, cs);
     this.ui.onChangesetUpdated(this.publicCs(cs), this.previewFor(cs));
     this.audit('proposed', cs);
 
-    return await new Promise<AgentOutcome>((resolve) => {
-      cs.resolve = resolve;
-      // FIX D: the human (or host) aborted the invocation — the ChangeSet is
-      // visibly 'cancelled', UI subscribers are notified, the agent promise
-      // settles exactly once.
-      const onAbort = (): void => this.cancelPending(cs, 'agent_aborted');
-      if (signal.aborted) onAbort();
-      else signal.addEventListener('abort', onAbort, { once: true });
-    });
+    // FIX D: the human (or host) aborted the invocation — the ChangeSet is
+    // visibly 'cancelled', UI subscribers are notified, the agent promise
+    // settles exactly once.
+    const onAbort = (): void => this.cancelPending(cs, 'agent_aborted');
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    return await outcome;
   }
 
   /** Cherry-pick: include or exclude a single operation. Excluded ops are never applied. */
@@ -770,7 +791,15 @@ export class RediniGuard {
    */
   private dropRegistrationOnAbort(name: string, signal: AbortSignal | undefined): void {
     if (!signal) return;
+    // `registrations` is keyed by NAME and both register* methods overwrite
+    // unconditionally, so this listener has to prove the entry is still the one
+    // it was installed for. Without that, a stale signal deletes whichever
+    // registration currently holds the name — and now that teardown retracts
+    // proposals, it would also cancel a live negotiation belonging to a
+    // registration that was never aborted.
+    const owned = this.registrations.get(name);
     const onAbort = (): void => {
+      if (this.registrations.get(name) !== owned) return;
       this.registrations.delete(name);
       // Deterministic teardown for ALREADY-PENDING ChangeSets. Without this a
       // proposal outlives its own tool: csIsStale() is false while nothing else
@@ -870,11 +899,13 @@ export class RediniGuard {
     if (skippedCount > 0) parts.push(`${skippedCount} skipped by you`);
     const summary = parts.join(' · ');
 
-    // The definition is resolved OUTSIDE the simulate guard on purpose. A
-    // torn-down registration is the ONLY reason allowed to cost us the diff
-    // silently, and even that is now transient: dropRegistrationOnAbort cancels
-    // the pending ChangeSets of a tool it removes, so this branch only covers
-    // the already-decided cards still being re-rendered.
+    // The definition is resolved OUTSIDE the simulate guard on purpose: a
+    // missing registration is the ONLY reason allowed to cost us the diff
+    // silently. It is not unreachable — emitUpdate() only calls previewFor for
+    // LIVE cards, and a name can lose its changeset registration without the
+    // teardown path running (re-registering the same name as a safe tool). Such
+    // a ChangeSet is un-committable, so keep the counts truthful and let the
+    // commit report the real error.
     let def: ChangeSetToolDefinition;
     try {
       def = this.changesetDef(cs.tool);
