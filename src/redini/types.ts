@@ -207,6 +207,14 @@ export interface PreviewInfo {
   summary: string;
   /** Domain-specific payload — for Atelier: the simulated design after the subset. */
   diff?: unknown;
+  /**
+   * Set ONLY when `runtime.simulate` threw: the host app's simulator is broken.
+   * `diff` is absent in that case, but absent-with-`error` and absent-because-
+   * the-tool-was-torn-down are deliberately distinguishable — a human must
+   * never be shown an empty preview that silently means "we could not compute
+   * one". Adapters should surface this and treat the preview as unavailable.
+   */
+  error?: string;
 }
 
 /**

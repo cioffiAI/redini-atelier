@@ -1,110 +1,110 @@
-# CONCEPT — "Redini" (nome di lavoro)
+# CONCEPT — "Redini" (working name)
 > Atelier turns an agent action into an editable ChangeSet. People can preview, amend, cherry-pick, commit and undo changes before the live canvas is mutated.
 > Redini is the transaction layer underneath.
 
-Stato: BOZZA v0.3 — 30/08/2026 — cambio di centro di gravità: da "consent wrapper" (già territorio affollato: @mcptrail/webmcp-consent, WebMCP Text Editor, WebMCP+Legit) alla **negoziazione umano-agente di un ChangeSet multi-operazione**.
+Status: DRAFT v0.3, 30/08/2026. Shift in center of gravity: from "consent wrapper" (already a crowded space: @mcptrail/webmcp-consent, WebMCP Text Editor, WebMCP+Legit) to **human-agent negotiation of a multi-operation ChangeSet**.
 
-Nuova unità centrale:
+New central unit:
 
 ```text
 Agent intent
       ↓
 ONE WebMCP call (design_update)
       ↓
-ChangeSet — es. 5 operazioni
+ChangeSet — e.g. 5 operations
 
 [✓] setText title → "AI SUMMIT"
 [✓] setFill background → #FF0055
 [✓] setFont → serif
-[ ] move logo → (620, 40)      ← l'umano la esclude
+[ ] move logo → (620, 40)      ← the human excludes it
 [✓] resize logo → 120
       ↓
-l'umano può: modificare i parametri (amend), escludere operazioni (cherry-pick), vedere il ghost
+the human can: change the parameters (amend), exclude operations (cherry-pick), see the ghost
       ↓
-atomic commit del subset
+atomic commit of the subset
       ↓
 RECEIPT: INTENDED / AMENDED / SKIPPED BY HUMAN / APPLIED / STATE v→v / UNDO
       ↓
-undo deterministico (inverse operations, non snapshot)
+deterministic undo (inverse operations, not snapshots)
 ```
 
-## 2. Perché questo claim (e non quello vecchio)
+## 2. Why this claim (and not the old one)
 
-### 2.1 La falsificazione che ha costretto il pivot
-Il claim originale — "un wrapper di conferma per WebMCP" — è stato verificato e **risulta già occupato**:
-- `@mcptrail/webmcp-consent` (npm, v0.1.0): wrapping della registrazione WebMCP con policy `auto/confirm/deny` e modal di approvazione. **Confermato esistente** (verificato il 29/08/2026).
-- Pattern `readOnlyHint` per letture automatiche + `confirm()` per le scritture: già usato da agent GUI esistenti.
-- Il flag `annotations.readOnlyHint` esiste già nella stessa spec WebMCP: la distinzione safe/mutante da sola è tabella, non innovazione.
+### 2.1 The falsification that forced the pivot
+The original claim, "a confirmation wrapper for WebMCP," was verified and **turns out to be already taken**:
+- `@mcptrail/webmcp-consent` (npm, v0.1.0): wraps WebMCP registration with an `auto/confirm/deny` policy and an approval modal. **Confirmed to exist** (verified on 29/08/2026).
+- The `readOnlyHint` pattern for automatic reads + `confirm()` for writes: already used by existing GUI agents.
+- The `annotations.readOnlyHint` flag already exists in the WebMCP spec itself: the safe/mutating distinction on its own is table stakes, not innovation.
 
-### 2.2 Il claim nuovo e la sua difendibilità
-L'approvazione è solo un pezzo. L'unità di Redini è la **transazione agentica**:
+### 2.2 The new claim and its defensibility
+Approval is only one piece. Redini's unit is the **agentic transaction**:
 
 ```
 agent intent → proposed mutation → visual preview/diff → human edit → commit → receipt → undo
 ```
 
-La combinazione — **live visual collaboration + staged transactions + editable proposal + rollback + audit trail** — è ciò che i confirmation gate esistenti NON hanno:
-- **Editable proposal**: l'umano modifica i parametri della proposta prima del commit (il gate esistente dice solo sì/no).
-- **Visual preview/diff**: il cambiamento proposto si vede sul prodotto reale prima di accaderlo (nel nostro caso: la locandina prima/dopo), non è un modal astratto.
-- **Receipts**: ogni commit produce una ricevuta strutturata (id, cambiamenti, timestamp, stato v→v) — tracciabilità a livello di transazione, non di log.
-- **Rollback nativo**: l'undo deterministico (via inverse operations, niente snapshot) è parte della transazione, non un'afterthought.
-- **Provenance**: audit trail completo di chi ha proposto cosa, cosa l'umano ha cambiato nella proposta, esito.
+The combination, **live visual collaboration + staged transactions + editable proposal + rollback + audit trail**, is what existing confirmation gates do NOT have:
+- **Editable proposal**: the human changes the proposal's parameters before commit (the existing gate only says yes/no).
+- **Visual preview/diff**: the proposed change is seen on the real product before it happens (in our case: the flyer before/after), not an abstract modal.
+- **Receipts**: every commit produces a structured receipt (id, changes, timestamp, state v→v), traceability at the transaction level, not the log level.
+- **Native rollback**: deterministic undo (via inverse operations, no snapshots) is part of the transaction, not an afterthought.
+- **Provenance**: complete audit trail of who proposed what, what the human changed in the proposal, and the outcome.
 
-## 3. Posizionamento onesto (NO security theater)
+## 3. Honest positioning (NO security theater)
 
-Redini **gira nella pagina**: un'app malevola o compromessa può aggirare un controllo client-side. Quindi:
-- ❌ NON presentiamo Redini come "rende sicuro WebMCP" o "security boundary".
-- ✅ Presentiamo Redini come **human control, recoverability, auditable mutations**: l'utente vede, decide, corregge e torna indietro. Autorizzazione e validazione vere restano server-side (dove devono stare).
-- Valore aggiunto: Redini riduce anche il blast radius di **content injection** (un contenuto non affidabile che induce l'agente a mutazioni non richieste): la mutazione resta una proposta ispezionabile, non diventa automaticamente stato dell'app. Un caso avversario in demo lo dimostra.
+Redini **runs in the page**: a malicious or compromised app can bypass a client-side control. So:
+- ❌ We do NOT present Redini as "makes WebMCP secure" or a "security boundary."
+- ✅ We present Redini as **human control, recoverability, auditable mutations**: the user sees, decides, corrects and goes back. Real authorization and validation stay server-side (where they belong).
+- Added value: Redini also reduces the blast radius of **content injection** (untrusted content that induces the agent into unrequested mutations): the mutation stays an inspectable proposal, it does not automatically become app state. An adversarial case in the demo shows this.
 
-## 4. Principi di design
+## 4. Design principles
 
-| Principio | Regola concreta |
+| Principle | Concrete rule |
 |---|---|
-| Leggere è gratis, mutare è una transazione | Tool read-only (`readOnlyHint`) girano subito; le mutazioni entrano in staging |
-| L'umano modifica la proposta, non solo la approva | Ogni transazione in staging è editabile nei parametri prima del commit |
-| Vedi prima che accada | Preview del diff sul prodotto reale (prima/dopo) dentro la card di staging |
-| Tutto ciò che si commetta ha una ricevuta | Receipt strutturata: id, cambiamenti, timestamp, stato v→v |
-| Tutto ciò che si commetta è reversibile | Rollback con un click; la ricevuta lo riferisce nell'audit trail |
-| L'agente non perde il filo | Ogni proposta riceve risposta strutturata (committed / modified / declined) — la collaborazione continua |
+| Reading is free, mutating is a transaction | Read-only tools (`readOnlyHint`) run immediately; mutations enter staging |
+| The human edits the proposal, not just approves it | Every staged transaction is editable in its parameters before commit |
+| See it before it happens | Preview of the diff on the real product (before/after) inside the staging card |
+| Everything committed has a receipt | Structured receipt: id, changes, timestamp, state v→v |
+| Everything committed is reversible | Rollback with one click; the receipt references it in the audit trail |
+| The agent never loses the thread | Every proposal gets a structured response (committed / modified / declined), the collaboration continues |
 
-## 5. Cosa consegna il progetto
+## 5. What the project delivers
 
-1. **`redini/`** — libreria open source (~600 righe, zero dipendenze, application-agnostic):
-   - `registerChangeSetTool()` (con `registerSafeTool()` per i read-only)
-   - ChangeSet multi-operazione: staging, per-op amend validato, cherry-pick, commit atomico del subset
-   - Receipt a righe strutturate: `intended / amended / skippedByHuman / applied` (con i valori realmente committati)
-   - Undo/redo deterministici via **inverse operations** (niente snapshot store): history editor-style con `undoStack`/`redoStack` — `undo()`/`redo()` senza token, ogni nuovo commit invalida il redo
-   - Audit trail di provenienza (chi ha proposto cosa, cosa l'umano ha cambiato, esito)
-2. **Atelier** — studio di design agent-native dove il flusso è:
-   un intent → 3 operazioni proposte → l'umano ne commetta una, ne modifica una (amend via form tipizzati), ne esclude una → ghost preview sul canvas prima del commit → receipt 4 sezioni → undo deterministico
-3. **Un caso avversario**: un contenuto di vendor non affidabile induce l'agente a proporre una mutazione non richiesta → Redini mostra che resta una proposta in staging, l'umano la rifiuta con un click.
+1. **`redini/`**: open-source library (~2,100 lines, zero dependencies; the guard core is application-agnostic, the bundled DOM panel is not yet):
+   - `registerChangeSetTool()` (with `registerSafeTool()` for read-only)
+   - multi-operation ChangeSet: staging, validated per-op amend, cherry-pick, atomic commit of the subset
+   - Structured-row receipt: `intended / amended / skippedByHuman / applied` (with the values actually committed)
+   - Deterministic undo/redo via **inverse operations** (no snapshot store): editor-style history with `undoStack`/`redoStack`; `undo()`/`redo()` without tokens, every new commit invalidates the redo
+   - Provenance audit trail (who proposed what, what the human changed, outcome)
+2. **Atelier**: agent-native design studio where the flow is:
+   one intent → 3 proposed operations → the human commits one, amends one (amend via typed forms), excludes one → ghost preview on the canvas before commit → 4-section receipt → deterministic undo
+3. **An adversarial case**: untrusted vendor content induces the agent to propose an unrequested mutation → Redini shows it stays a staged proposal, the human rejects it with one click.
 
-## 6. Atelier: perché è il dimostratore giusto
+## 6. Atelier: why it is the right demonstrator
 
-Un todo-list o un CRM renderebbero Redini una demo CRUD tra mille. In un **editor visuale**:
-- Le mutazioni sono visibili (diff reale sul ghost preview, non descrizione astratta).
-- La collaborazione umano-agente è naturale ("rendilo più minimal" → proposta → correzione "blu → verde" via amend per-operazione).
-- La storia si chiude in un arco unico: un intent → un ChangeSet multi-op → negoziazione → commit del subset → receipt → undo.
-- È il caso d'uso flagship della stessa spec WebMCP (Jen e il flyer): i giudici lo riconoscono.
+A todo-list or a CRM would make Redini one CRUD demo among thousands. In a **visual editor**:
+- Mutations are visible (real diff on the ghost preview, not an abstract description).
+- Human-agent collaboration is natural ("make it more minimal" → proposal → correction "blue → green" via per-operation amend).
+- The story closes in a single arc: one intent → one multi-op ChangeSet → negotiation → commit of the subset → receipt → undo.
+- It is the flagship use case of the WebMCP spec itself (Jen and the flyer): judges recognize it.
 
-## 7. Mappatura ai 4 criteri di giudizio (stima post-pivot)
+## 7. Mapping to the 4 judging criteria (post-pivot estimate)
 
-| Criterio | Come Redini lo soddisfa | Stima |
+| Criterion | How Redini satisfies it | Estimate |
 |---|---|---|
-| WebMCP Leverage | Superficie API usata in v3: registerTool + inputSchema strict per-kind (hand-authored, registrato verbatim), readOnlyHint/untrustedContentHint, AbortSignal, blocking execute verificato >90s. Niente dynamic tools/toolchange/declarative form/respondWith in v3 — rimossi, la superficie è fissa a 5 tool | 7.5/10 |
-| Execution | Atelier come prodotto rifinito (non playground): flusso completo con ChangeSet negoziato | 8/10 (se il polish è curato) |
-| Potential Impact | Le mutazioni agentiche sono il collo di bottiglia dell'adozione; libreria riusabile da qualsiasi app WebMCP | 7.5/10 |
-| Creativity & Ambition | Da 5.5-6/10 col claim della sola conferma (già occupato) a 8-8.5/10 col claim "transactional human control": inspect/edit/commit/rollback vs popup "Allow?" | 8-8.5/10 |
+| WebMCP Leverage | API surface used in v3: registerTool + strict per-kind inputSchema (hand-authored, registered verbatim), readOnlyHint/untrustedContentHint, AbortSignal, blocking execute verified >90s. No dynamic tools/toolchange/declarative form/respondWith in v3: removed, the surface is fixed at 5 tools | 7.5/10 |
+| Execution | Atelier as a polished product (not a playground): complete flow with a negotiated ChangeSet | 8/10 (if the polish is careful) |
+| Potential Impact | Agentic mutations are the bottleneck of adoption; library reusable by any WebMCP app | 7.5/10 |
+| Creativity & Ambition | From 5.5-6/10 with the confirmation-only claim (already taken) to 8-8.5/10 with the "transactional human control" claim: inspect/edit/commit/rollback vs an "Allow?" popup | 8-8.5/10 |
 
-## 8. Cosa impari (obiettivo personale)
+## 8. What you learn (personal goal)
 
-Costruire una transaction layer obbliga a dominare: lifecycle dei tool, blocking execute e timeout, API dichiarativa dei form (che È già una transazione in staging nativa — la spec lo conferma con `:tool-form-active`), AbortSignal, schema synthesis, e design di API con semantica transazionale. Più la disciplina di verificare le assunzioni su terra reale (lo spike ha già corretto due assunzioni: firma JSON-string di executeTool, attesa illimitata delle promesse).
+Building a transaction layer forces you to master: tool lifecycle, blocking execute and timeout, the declarative form API (which IS already a native staged transaction: the spec confirms it with `:tool-form-active`), AbortSignal, schema synthesis, and API design with transactional semantics. Plus the discipline of verifying assumptions on real ground (the spike already corrected two assumptions: the JSON-string signature of executeTool, the unbounded wait on promises).
 
-## 9. Criteri di successo
+## 9. Success criteria
 
-1. Funziona nel browser in-app di ChatGPT E in Chrome 149+ (flag), senza errori in console.
-2. Nel video, UN solo scenario continuo < 3 min: richiesta iniziale ("rendi il poster più minimal" in un intent) → ChangeSet a 3 operazioni in staging → amend di una, skip di un'altra, commit del subset → receipt 4 sezioni → l'agente riceve la risposta strutturata e continua → undo deterministico → caso avversario (vendor injection, rifiuto).
-3. La libreria è copiabile in un altro progetto; il README spiega il pattern in 30 secondi.
-4. Repo pubblico, MIT, distintivo in About.
-5. Tutto consegnato entro le 22:00 italiane del 3 settembre — target: pronto il 2 settembre.
+1. Works in ChatGPT's in-app browser AND in Chrome 149+ (flag), with no console errors.
+2. In the video, ONE single continuous scenario < 3 min: initial request ("make the poster more minimal" in one intent) → 3-operation ChangeSet in staging → amend one, skip another, commit the subset → 4-section receipt → the agent receives the structured response and continues → deterministic undo → adversarial case (vendor injection, rejection).
+3. The library is copy-paste-able into another project; the README explains the pattern in 30 seconds.
+4. Public repo, MIT, distinctive in About.
+5. Everything delivered by 22:00 Italian time on September 3. Target: ready on September 2.

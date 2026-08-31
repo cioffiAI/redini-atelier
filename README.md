@@ -115,14 +115,87 @@ window.originAgentCluster;              // → true
 
 ### E2E troubleshooting
 
-- If `node scripts/atelier-e2e.mjs` cannot find Chrome: adjust `CHROME` at the top of the script.
-- Stale Chrome profile: `pkill -f "user-data-dir=/tmp/atelier-chrome-profile"` before rerunning.
+- If `node scripts/atelier-e2e.mjs` cannot find Chrome: set the `CHROME` env var to your Chrome executable (the default is the macOS path).
+- Stale Chrome profile: remove `atelier-chrome-profile` from your OS temp dir (`os.tmpdir()`) before rerunning.
 - Dev server down: `nohup npm run dev > /tmp/vite-dev.log 2>&1 &`.
+
+## Using Redini in your own app
+
+`src/redini/` has no imports from `src/atelier/`. The guard core treats operation kinds as opaque strings and takes everything domain-specific through hooks: you supply an **operation runtime** (`apply` mutates real state and returns the exact inverse, `simulate` previews a subset on a throw-away copy) and a **UI adapter**.
+
+```ts
+import { createGuard, InMemoryUI } from './redini';
+
+const store = { title: 'Hello' };
+let version = 0;
+
+const ui = new InMemoryUI();     // headless recorder — swap in your own adapter
+const guard = createGuard({ ui, modelContext: document.modelContext ?? null });
+
+guard.registerChangeSetTool({
+  name: 'title_update',
+  description: 'Proposes title changes; nothing applies until the human commits.',
+  kinds: ['setTitle'],
+  validate: (op) => (typeof op.params.value === 'string' ? null : 'value must be a string'),
+  describeOperation: (op) => `title → "${String(op.params.value)}"`,
+  getStateVersion: () => version,
+  runtime: {
+    // apply RETURNS the inverse — that is what makes undo deterministic.
+    apply: (op) => {
+      const previous = store.title;
+      store.title = String(op.params.value);
+      version += 1;
+      return { ...op, params: { value: previous } };
+    },
+    simulate: (ops) => ops.reduce((d, op) => ({ ...d, title: String(op.params.value) }), { ...store }),
+  },
+});
+
+// Agent side — this promise stays PENDING for the whole negotiation.
+const pending = guard.dispatch('title_update', {
+  intent: 'Make the title louder',
+  operations: [{ kind: 'setTitle', params: { value: 'HELLO' } }],
+});
+
+// Human side — what your adapter drives. Operation ids are positional: op-1, op-2, …
+const csId = ui.lastChangeSetId();
+guard.amendOperation(csId, 'op-1', { value: 'Hello!' });
+await guard.commitChangeSet(csId);
+await pending;   // { status: 'committed', appliedCount: 1, undoAvailable: true, … }
+if (guard.canUndo()) await guard.undo();
+```
+
+| Entry point | What it does |
+|---|---|
+| `createGuard({ ui, modelContext })` | `ui` is the only required option and everything is construction-only. With no model context the tools still work in-page through `dispatch`. |
+| `registerSafeTool(def, { signal })` | Read-only tool: runs immediately, returns its result, produces no ChangeSet. |
+| `registerChangeSetTool(def, { signal })` | The mutating tool. Without an `inputSchema` Redini generates one from `kinds`. |
+| `dispatch(tool, input, signal?, { actor })` | Agent entry point. Aborting the signal cancels a pending ChangeSet: the agent promise resolves `cancelled`, it never rejects. |
+| `toggleOperation` / `amendOperation` | Cherry-pick and amend a single operation. The original params are kept for the receipt. |
+| `commitChangeSet` / `declineChangeSet` | Apply the included subset atomically, or apply nothing. |
+| `undo()` / `redo()` | Guard with `canUndo()` / `canRedo()`. A new commit clears the redo stack. |
+
+### The UIAdapter contract
+
+Five callbacks, all required: `onChangesetUpdated(cs, preview)`, `onReceipt`, `onUndo`, `onRedo`, `onAudit`. Redini pushes, you never poll. Three things that will bite you:
+
+- `onChangesetUpdated` is an **upsert keyed on `cs.id`**, not a create event. It also fires for every still-pending ChangeSet after any commit, undo or redo, which is how staleness reaches your UI.
+- **The preview payload is nested.** `PreviewInfo` is `{ summary, diff?, error? }` and the guard sets `diff = { appliedPreview: <what your simulate returned> }`, so read `preview.diff.appliedPreview`. If your `simulate` throws, `diff` is absent and `error` carries the message: surface it and treat the preview as unavailable, because an empty preview that silently means "we could not compute one" is the exact failure this layer exists to prevent.
+- **`bind` is not part of `UIAdapter`.** The guard constructor calls `opts.ui.bind?.(this)` on the top-level object only, so `createDomPanel`'s own required `bind` is never reached that way: your adapter has to forward it. See `src/main.ts`.
+
+### Limits worth knowing first
+
+- **The bundled DOM panel is not portable yet.** `createDomPanel` builds its amendment forms from a `switch` over Atelier's five operation kinds, and two of its strings say "poster". Other kinds fall through to "No editable parameters", so per-operation amendment will not work for your vocabulary until that switch is generalised. The guard core has no such coupling.
+- **Nothing times out and nothing evicts.** An undecided ChangeSet keeps the agent's promise pending indefinitely and stays in `getChangeSets()`. The only way out is an `AbortSignal`: aborting the *invocation* signal cancels that one ChangeSet, and aborting the *registration* signal unregisters the tool and retracts every proposal still open on it. Both settle the agent with `cancelled`.
+- **Undo and redo replay inverses straight into `runtime.apply`**, bypassing `validate` and the `kinds` allowlist. Your inverses have to be trustworthy by construction.
+- **Redini is not a security boundary.** It runs in the page, and any script on that page can call `guard.commitChangeSet`. It buys human control, recoverability and an audit trail. Nothing beyond that.
+
+Every rejection is a `RediniError` carrying a `.code`; switch on the code, never the message. The three to handle: `STALE_TRANSACTION` (the state moved, re-propose), `EMPTY_CHANGESET` (every operation toggled off, and the only commit error that leaves the ChangeSet still reviewable), and `ROLLBACK_FAILED` (a compensation itself threw, `detail` carries what was applied and what was compensated, and the state is **not** clean).
 
 ## Repository layout
 
 - `src/atelier/` — the demo app: design store (pure logic), tools, UI.
-- `src/redini/` — the transaction layer: guard, ChangeSet model, DOM panel, in-memory UI adapter. Application-agnostic: it knows nothing about flyers.
+- `src/redini/` — the transaction layer: guard, ChangeSet model, DOM panel, in-memory UI adapter. The guard core knows nothing about flyers; the bundled DOM panel still hardcodes Atelier's operation kinds, see [Using Redini in your own app](#using-redini-in-your-own-app).
 - `docs/` — concept, technical design (v3 semantics), plan, spike report.
 
 ## License
