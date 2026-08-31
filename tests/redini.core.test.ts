@@ -1319,19 +1319,137 @@ describe('Redini v3 — ChangeSet gates', () => {
     await expect(guard.commitChangeSet(csKeeper)).resolves.toBeTruthy();
     expect(state.title).toBe('KEPT');
 
-    // The orphaned pending ChangeSet was re-emitted truthfully: counts intact,
-    // no simulated diff, and it is honestly stale (the world moved).
-    const orphan = ui.changeSets.get(csDoomed);
-    expect(orphan?.changeset.isStale).toBe(true);
-    expect(orphan?.preview?.summary).toContain('1/1 operation(s) will apply');
-    expect(orphan?.preview?.diff).toBeUndefined();
+    // Teardown RETRACTS the proposal instead of orphaning it: the card is
+    // terminally 'cancelled' and a decided card carries no live preview.
+    const retracted = ui.changeSets.get(csDoomed);
+    expect(retracted?.changeset.status).toBe('cancelled');
+    expect(retracted?.preview).toBeNull();
 
-    // Amending the orphan fails deterministically (its tool is gone).
+    // Every human path on a retracted ChangeSet is now the SAME deterministic
+    // refusal, and none of them can hang the agent.
     expect(() => guard.amendOperation(csDoomed, 'op-1', { field: 'title', value: 'Z' })).toThrowError(
-      /UNKNOWN_TOOL/,
+      /ALREADY_DECIDED/,
     );
-    await expect(guard.commitChangeSet(csDoomed)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
-    expect(await pDoomed).toMatchObject({ status: 'stale_transaction', changeSetId: csDoomed });
+    await expect(guard.commitChangeSet(csDoomed)).rejects.toMatchObject({ code: 'ALREADY_DECIDED' });
+    expect(await pDoomed).toMatchObject({ status: 'cancelled', changeSetId: csDoomed });
     expect(await pKeeper).toMatchObject({ status: 'committed', changeSetId: csKeeper });
+  });
+
+  it('46. a THROWING simulate is never reported as "no diff": the registration is intact, so the preview carries the error instead of quietly emptying', async () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const state = { title: 'Hello', version: 0 };
+    let simulateBroken = true;
+    guard.registerChangeSetTool({
+      name: 'flaky_preview',
+      description: 'Its simulator throws; its apply works.',
+      kinds: ['setText'],
+      getStateVersion: () => state.version,
+      runtime: {
+        apply(op) {
+          const prev = state.title;
+          state.title = String(op.params.value);
+          state.version += 1;
+          return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+        },
+        simulate: (ops) => {
+          if (simulateBroken) throw new Error('simulator exploded');
+          return { title: String(ops.at(-1)?.params.value ?? state.title) };
+        },
+      },
+    });
+
+    const p = guard.dispatch('flaky_preview', {
+      intent: 'preview will fail',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'NEW' } }],
+    }) as Promise<AgentOutcome>;
+    p.catch(() => {});
+    const csId = ui.lastChangeSetId();
+
+    // The distinction the whole fix exists for: a broken simulator and a torn
+    // down tool BOTH lose the diff, but only one of them is silent.
+    const preview = ui.changeSets.get(csId)?.preview;
+    expect(preview?.diff).toBeUndefined();
+    expect(preview?.error).toBe('simulator exploded');
+    // The counts never lied and still do not.
+    expect(preview?.summary).toContain('1/1 operation(s) will apply');
+
+    // The failure is per-emit, not sticky: fix the simulator, amend, and the
+    // diff comes back with no error attached.
+    simulateBroken = false;
+    const after = guard.amendOperation(csId, 'op-1', { field: 'title', value: 'FIXED' }).preview;
+    expect(after).not.toBeNull();
+    expect(after?.error).toBeUndefined();
+    expect(after?.diff).toEqual({ appliedPreview: { title: 'FIXED' } });
+
+    await expect(guard.commitChangeSet(csId)).resolves.toBeTruthy();
+    expect(state.title).toBe('FIXED');
+    expect(await p).toMatchObject({ status: 'committed', appliedCount: 1 });
+  });
+
+  it('47. tearing down a tool with a pending ChangeSet and NO other mutation settles the agent instead of orphaning it', async () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const state = { title: 'Hello', version: 0 };
+    const ac = new AbortController();
+    guard.registerChangeSetTool({
+      name: 'lonely_tool',
+      description: 'The only tool; nothing else will ever mutate the world.',
+      kinds: ['setText'],
+      getStateVersion: () => state.version,
+      runtime: {
+        apply(op) {
+          const prev = state.title;
+          state.title = String(op.params.value);
+          state.version += 1;
+          return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+        },
+        simulate: (ops) => ({ title: String(ops.at(-1)?.params.value ?? state.title) }),
+      },
+    }, { signal: ac.signal });
+
+    const p = guard.dispatch('lonely_tool', {
+      intent: 'pending forever?',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'NEVER' } }],
+    }) as Promise<AgentOutcome>;
+    p.catch(() => {});
+    const csId = ui.lastChangeSetId();
+    expect(ui.changeSets.get(csId)?.changeset.status).toBe('proposed');
+
+    // Teardown with NOTHING else happening. This is the gap: the state version
+    // is untouched and Redini's own mutation counter never moved, so the old
+    // csIsStale() said "fresh" and commitChangeSet() went on to throw
+    // UNKNOWN_TOOL without ever settling the agent.
+    ac.abort();
+    expect(state.version).toBe(0);
+
+    // The promise is settled by the teardown itself. If this ever regresses the
+    // test hangs rather than fails, which is precisely the bug's signature.
+    expect(await p).toMatchObject({ status: 'cancelled', changeSetId: csId, appliedCount: 0 });
+    expect(ui.changeSets.get(csId)?.changeset.status).toBe('cancelled');
+    expect(ui.audit.some((a) => a.kind === 'cancelled' && a.detail?.reason === 'tool_unregistered')).toBe(true);
+
+    // And the human path agrees: no committable ghost left behind.
+    await expect(guard.commitChangeSet(csId)).rejects.toMatchObject({ code: 'ALREADY_DECIDED' });
+    expect(state.title).toBe('Hello');
+  });
+
+  it('48. an ALREADY-aborted registration signal never leaves the tool registered', () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const ac = new AbortController();
+    ac.abort();
+    guard.registerChangeSetTool({
+      name: 'stillborn',
+      description: 'Registered with a signal that is already aborted.',
+      kinds: ['setText'],
+      runtime: { apply: (op) => op, simulate: () => ({}) },
+    }, { signal: ac.signal });
+    // Listening for 'abort' on an already-aborted signal never fires, so this
+    // used to stay registered forever.
+    expect(() => guard.amendOperation('nope', 'op-1', {})).toThrowError(/UNKNOWN_CHANGESET/);
+    return expect(
+      guard.dispatch('stillborn', { intent: 'x', operations: [{ kind: 'setText', params: { value: 'y' } }] }),
+    ).rejects.toMatchObject({ code: 'UNKNOWN_TOOL' });
   });
 });

@@ -177,13 +177,13 @@ if (guard.canUndo()) await guard.undo();
 Five callbacks, all required: `onChangesetUpdated(cs, preview)`, `onReceipt`, `onUndo`, `onRedo`, `onAudit`. Redini pushes, you never poll. Three things that will bite you:
 
 - `onChangesetUpdated` is an **upsert keyed on `cs.id`**, not a create event. It also fires for every still-pending ChangeSet after any commit, undo or redo, which is how staleness reaches your UI.
-- **The preview payload is nested.** `PreviewInfo` is `{ summary, diff? }` and the guard sets `diff = { appliedPreview: <what your simulate returned> }`, so read `preview.diff.appliedPreview`. If `simulate` throws, `diff` is absent entirely.
+- **The preview payload is nested.** `PreviewInfo` is `{ summary, diff?, error? }` and the guard sets `diff = { appliedPreview: <what your simulate returned> }`, so read `preview.diff.appliedPreview`. If your `simulate` throws, `diff` is absent and `error` carries the message: surface it and treat the preview as unavailable, because an empty preview that silently means "we could not compute one" is the exact failure this layer exists to prevent.
 - **`bind` is not part of `UIAdapter`.** The guard constructor calls `opts.ui.bind?.(this)` on the top-level object only, so `createDomPanel`'s own required `bind` is never reached that way: your adapter has to forward it. See `src/main.ts`.
 
 ### Limits worth knowing first
 
 - **The bundled DOM panel is not portable yet.** `createDomPanel` builds its amendment forms from a `switch` over Atelier's five operation kinds, and two of its strings say "poster". Other kinds fall through to "No editable parameters", so per-operation amendment will not work for your vocabulary until that switch is generalised. The guard core has no such coupling.
-- **Nothing times out and nothing evicts.** An undecided ChangeSet keeps the agent's promise pending indefinitely and stays in `getChangeSets()`. The only way out is an `AbortSignal`.
+- **Nothing times out and nothing evicts.** An undecided ChangeSet keeps the agent's promise pending indefinitely and stays in `getChangeSets()`. The only way out is an `AbortSignal`: aborting the *invocation* signal cancels that one ChangeSet, and aborting the *registration* signal unregisters the tool and retracts every proposal still open on it. Both settle the agent with `cancelled`.
 - **Undo and redo replay inverses straight into `runtime.apply`**, bypassing `validate` and the `kinds` allowlist. Your inverses have to be trustworthy by construction.
 - **Redini is not a security boundary.** It runs in the page, and any script on that page can call `guard.commitChangeSet`. It buys human control, recoverability and an audit trail. Nothing beyond that.
 

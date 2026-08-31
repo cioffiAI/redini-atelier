@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # `npm run build` is `tsc && vite build`, so this covers type checking too.
+      - run: npm test
+      - run: npm run build
+
+# scripts/atelier-e2e.mjs is deliberately NOT run here. It drives the real
+# WebMCP tool path, which needs Chrome 149+ launched with
+# --enable-features=WebMCP — an experimental flag behind a moving target. Wiring
+# it to a hosted runner would buy a red badge that tracks Chrome's release
+# channel rather than this repo, so the e2e stays a local gate:
+#   node scripts/atelier-e2e.mjs   (see README, "How to run")
