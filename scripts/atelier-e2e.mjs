@@ -18,9 +18,12 @@
  * Usage: node scripts/atelier-e2e.mjs
  * Requires: dev server on http://localhost:5173, Chrome 149+ (WebMCP flag).
  */
+import os from 'node:os';
+import path from 'node:path';
 import puppeteer from 'puppeteer-core';
 
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const CHROME = process.env.CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const PROFILE = `${os.tmpdir()}${path.sep}atelier-chrome-profile`;
 const URL = 'http://localhost:5173/?clean=1';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -31,7 +34,7 @@ function assert(cond, message) {
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: true,
-  args: ['--enable-features=WebMCP', '--no-first-run', '--disable-extensions', '--user-data-dir=/tmp/atelier-chrome-profile'],
+  args: ['--enable-features=WebMCP', '--no-first-run', '--disable-extensions', `--user-data-dir=${PROFILE}`],
 });
 const page = await browser.newPage();
 

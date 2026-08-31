@@ -159,15 +159,7 @@ export class RediniGuard {
       },
       options,
     );
-    // Keep the in-page registry consistent with the WebMCP registry on abort,
-    // so dynamic unregistration behaves the same with and without a model context.
-    options?.signal?.addEventListener(
-      'abort',
-      () => {
-        this.registrations.delete(def.name);
-      },
-      { once: true },
-    );
+    this.dropRegistrationOnAbort(def.name, options?.signal);
   }
 
   registerChangeSetTool(def: ChangeSetToolDefinition, options?: { signal?: AbortSignal }): void {
@@ -196,6 +188,7 @@ export class RediniGuard {
       },
       options,
     );
+    this.dropRegistrationOnAbort(def.name, options?.signal);
   }
 
   /**
@@ -368,14 +361,14 @@ export class RediniGuard {
    */
   async commitChangeSet(csId: string): Promise<ChangeSetReceipt> {
     const cs = this.requireCs(csId);
-    const def = this.changesetDef(cs.tool);
     if (DECIDED_CHANGESET_STATUSES.includes(cs.status)) {
       throw new RediniError('ALREADY_DECIDED', `ChangeSet ${csId} is already ${cs.status}`);
     }
 
-    const appVersionChanged =
-      def.getStateVersion !== undefined && def.getStateVersion() !== cs.stateVersion;
-    if (appVersionChanged || this.mutationCounter !== cs.mutationIndex) {
+    // csIsStale tolerates a torn-down registration (only Redini's own counter
+    // guards then) — an orphaned pending ChangeSet reports the TRUTHFUL
+    // STALE_TRANSACTION instead of UNKNOWN_TOOL whenever the world moved.
+    if (this.csIsStale(cs)) {
       cs.status = 'stale';
       this.audit('stale', cs);
       this.emitUpdate(cs);
@@ -390,6 +383,7 @@ export class RediniGuard {
       });
       throw new RediniError('STALE_TRANSACTION', `ChangeSet ${csId} was proposed on a previous state`);
     }
+    const def = this.changesetDef(cs.tool);
 
     const included = cs.ops.filter((o) => o.included);
     if (included.length === 0) {
@@ -628,13 +622,7 @@ export class RediniGuard {
       };
       const cs = this.changeSets.get(entry.changeSetId);
       if (cs) cs.status = 'undo_failed';
-      this.ui.onAudit({
-        kind: 'undo_failed',
-        txId: entry.changeSetId,
-        tool: entry.tool,
-        at: this.now(),
-        detail,
-      });
+      this.audit('undo_failed', cs, detail);
       if (cs) this.emitUpdate(cs);
       // MELD: same conservative invalidation as the commit — the catch is
       // reachable only after >=1 inverse apply attempt, and a throwing apply
@@ -712,13 +700,7 @@ export class RediniGuard {
         cause,
       };
       const cs = this.changeSets.get(entry.changeSetId);
-      this.ui.onAudit({
-        kind: 'redo_failed',
-        txId: entry.changeSetId,
-        tool: entry.tool,
-        at: this.now(),
-        detail,
-      });
+      this.audit('redo_failed', cs, detail);
       if (cs) this.emitUpdate(cs);
       // MELD: same conservative invalidation as the commit — the catch is
       // reachable only after >=1 forward apply attempt, and a throwing apply
@@ -794,6 +776,21 @@ export class RediniGuard {
 
   // ---------- internals ----------
 
+  /**
+   * Keep the in-page registry consistent with the WebMCP registry on abort,
+   * so dynamic unregistration behaves the same with and without a model
+   * context — for BOTH safe and changeset tools (symmetric teardown).
+   */
+  private dropRegistrationOnAbort(name: string, signal: AbortSignal | undefined): void {
+    signal?.addEventListener(
+      'abort',
+      () => {
+        this.registrations.delete(name);
+      },
+      { once: true },
+    );
+  }
+
   private requireCs(csId: string): InternalChangeSet {
     const cs = this.changeSets.get(csId);
     if (!cs) throw new RediniError('UNKNOWN_CHANGESET', `no ChangeSet "${csId}"`);
@@ -848,20 +845,24 @@ export class RediniGuard {
   }
 
   private previewFor(cs: InternalChangeSet): PreviewInfo {
-    const def = this.changesetDef(cs.tool);
-    const included = cs.ops
-      .filter((o) => o.included)
-      .map((o) => ({ kind: o.kind, params: structuredClone(o.params) }));
-    const simulated = def.runtime.simulate(included);
+    const included = cs.ops.filter((o) => o.included);
+    let diff: { appliedPreview: unknown } | undefined;
+    try {
+      const simulated = this.changesetDef(cs.tool).runtime.simulate(
+        included.map((o) => ({ kind: o.kind, params: structuredClone(o.params) })),
+      );
+      diff = { appliedPreview: simulated };
+    } catch {
+      // Tool registration gone (abort teardown): the counts below stay
+      // truthful, only the simulated diff is dropped — mirroring csIsStale's
+      // tolerance for a torn-down registration.
+    }
     const amendedCount = cs.ops.filter((o) => o.amended && o.included).length;
     const skippedCount = cs.ops.filter((o) => !o.included).length;
     const parts: string[] = [`${included.length}/${cs.ops.length} operation(s) will apply`];
     if (amendedCount > 0) parts.push(`${amendedCount} amended by you`);
     if (skippedCount > 0) parts.push(`${skippedCount} skipped by you`);
-    return {
-      summary: parts.join(' · '),
-      diff: { appliedPreview: simulated },
-    };
+    return { summary: parts.join(' · '), ...(diff ? { diff } : {}) };
   }
 
   private emitUpdate(cs: InternalChangeSet): void {

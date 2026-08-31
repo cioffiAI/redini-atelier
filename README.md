@@ -112,8 +112,8 @@ window.originAgentCluster;              // → true
 
 ### E2E troubleshooting
 
-- If `node scripts/atelier-e2e.mjs` cannot find Chrome: adjust `CHROME` at the top of the script.
-- Stale Chrome profile: `pkill -f "user-data-dir=/tmp/atelier-chrome-profile"` before rerunning.
+- If `node scripts/atelier-e2e.mjs` cannot find Chrome: set the `CHROME` env var to your Chrome executable (the default is the macOS path).
+- Stale Chrome profile: remove `atelier-chrome-profile` from your OS temp dir (`os.tmpdir()`) before rerunning.
 - Dev server down: `nohup npm run dev > /tmp/vite-dev.log 2>&1 &`.
 
 ## Repository layout

@@ -768,6 +768,7 @@ describe('Redini v3 — ChangeSet gates', () => {
     const audit = f.ui.audit.find((a) => a.kind === 'undo_failed' && a.txId === csId);
     expect(audit?.detail?.attempted).toEqual(['op-3', 'op-2']);
     expect(audit?.detail?.remaining).toEqual(['op-1']);
+    expect(audit?.actor).toBe('agent'); // routed through this.audit() — provenance kept
     // partial replay happened exactly once: op-3's inverse restored x to 2
     expect(f.state.x).toBe(2);
     expect(f.guard.getChangeSet(csId)?.status).toBe('undo_failed');
@@ -1261,5 +1262,76 @@ describe('Redini v3 — ChangeSet gates', () => {
 
     await expect(f.guard.commitChangeSet(csB)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
     expect(f.state.x).toBe(1);
+  });
+
+  it('45. abort teardown is symmetric: a torn-down changeset tool leaves the registry, its pending preview degrades (no diff), and OTHER commits never crash', async () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const state = { title: 'Hello', version: 0 };
+    const runtime: OperationRuntime = {
+      apply(op) {
+        const prev = state.title;
+        state.title = String(op.params.value);
+        state.version += 1;
+        return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+      },
+      simulate: (ops) => ({ title: String(ops.at(-1)?.params.value ?? state.title) }),
+    };
+    const ac = new AbortController();
+    guard.registerChangeSetTool({
+      name: 'doomed_tool',
+      description: 'Will be torn down.',
+      kinds: ['setText'],
+      runtime,
+      getStateVersion: () => state.version,
+    }, { signal: ac.signal });
+    guard.registerChangeSetTool({
+      name: 'keeper_tool',
+      description: 'Stays registered.',
+      kinds: ['setText'],
+      runtime,
+      getStateVersion: () => state.version,
+    });
+
+    // A pending proposal on the tool that is ABOUT to be torn down.
+    const pDoomed = guard.dispatch('doomed_tool', {
+      intent: 'pending on doomed',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'DOOMED' } }],
+    }) as Promise<AgentOutcome>;
+    pDoomed.catch(() => {});
+    const csDoomed = ui.lastChangeSetId();
+    expect(ui.changeSets.get(csDoomed)?.preview?.diff).toBeDefined();
+
+    // Teardown: the registration is gone — same as registerSafeTool on abort.
+    ac.abort();
+    await expect(
+      guard.dispatch('doomed_tool', { intent: 'x', operations: [{ kind: 'setText', params: { field: 'title', value: 'Y' } }] }),
+    ).rejects.toMatchObject({ code: 'UNKNOWN_TOOL' });
+
+    // Committing the OTHER tool must not crash in sweepPendingPreviews over the
+    // orphaned pending ChangeSet: its preview degrades to summary-only (no diff).
+    const pKeeper = guard.dispatch('keeper_tool', {
+      intent: 'keeper',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'KEPT' } }],
+    }) as Promise<AgentOutcome>;
+    pKeeper.catch(() => {});
+    const csKeeper = ui.lastChangeSetId();
+    await expect(guard.commitChangeSet(csKeeper)).resolves.toBeTruthy();
+    expect(state.title).toBe('KEPT');
+
+    // The orphaned pending ChangeSet was re-emitted truthfully: counts intact,
+    // no simulated diff, and it is honestly stale (the world moved).
+    const orphan = ui.changeSets.get(csDoomed);
+    expect(orphan?.changeset.isStale).toBe(true);
+    expect(orphan?.preview?.summary).toContain('1/1 operation(s) will apply');
+    expect(orphan?.preview?.diff).toBeUndefined();
+
+    // Amending the orphan fails deterministically (its tool is gone).
+    expect(() => guard.amendOperation(csDoomed, 'op-1', { field: 'title', value: 'Z' })).toThrowError(
+      /UNKNOWN_TOOL/,
+    );
+    await expect(guard.commitChangeSet(csDoomed)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
+    expect(await pDoomed).toMatchObject({ status: 'stale_transaction', changeSetId: csDoomed });
+    expect(await pKeeper).toMatchObject({ status: 'committed', changeSetId: csKeeper });
   });
 });
