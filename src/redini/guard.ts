@@ -100,6 +100,17 @@ function defaultInputSchema(kinds: string[]): object {
   };
 }
 
+/**
+ * A registration whose signal is ALREADY aborted is dead on arrival, and it
+ * must never reach the host registry: 'abort' never fires again for a spent
+ * signal, so the host would advertise a tool forever that the guard does not
+ * know about — the exact registry asymmetry the abort teardown exists to
+ * prevent. Refusing the registration outright keeps both sides agreeing.
+ */
+function registrationIsSpent(options?: { signal?: AbortSignal }): boolean {
+  return options?.signal?.aborted === true;
+}
+
 function toMcpResult(outcome: AgentOutcome): AgentOutcome {
   // FIX I: direct structured serialization — the execute callback returns this
   // object as-is; no `{content:[{type:'text',...}]}` envelope.
@@ -146,6 +157,7 @@ export class RediniGuard {
   }
 
   registerSafeTool(def: SafeToolDefinition, options?: { signal?: AbortSignal }): void {
+    if (registrationIsSpent(options)) return;
     this.registrations.set(def.name, { kind: 'safe', def });
     this.mcp?.registerTool(
       {
@@ -161,18 +173,11 @@ export class RediniGuard {
       },
       options,
     );
-    // Keep the in-page registry consistent with the WebMCP registry on abort,
-    // so dynamic unregistration behaves the same with and without a model context.
-    options?.signal?.addEventListener(
-      'abort',
-      () => {
-        this.registrations.delete(def.name);
-      },
-      { once: true },
-    );
+    this.dropRegistrationOnAbort(def.name, options?.signal);
   }
 
   registerChangeSetTool(def: ChangeSetToolDefinition, options?: { signal?: AbortSignal }): void {
+    if (registrationIsSpent(options)) return;
     this.registrations.set(def.name, { kind: 'changeset', def });
     this.mcp?.registerTool(
       {
@@ -198,6 +203,7 @@ export class RediniGuard {
       },
       options,
     );
+    this.dropRegistrationOnAbort(def.name, options?.signal);
   }
 
   /**
@@ -292,32 +298,27 @@ export class RediniGuard {
       resolve: null,
       settled: false,
     };
+    // The resolver MUST exist BEFORE the ChangeSet is published. Publishing it
+    // makes it reachable by the teardown sweep and by re-entrant host code
+    // (onChangesetUpdated and onAudit below are app callbacks), and settle()
+    // against a null resolver would burn cs.settled while nothing ever resolves
+    // the agent promise: stranded, with every recovery path short-circuiting on
+    // that same flag. Assigning it first removes the window instead of guarding
+    // it.
+    const outcome = new Promise<AgentOutcome>((resolve) => {
+      cs.resolve = resolve;
+    });
     this.changeSets.set(cs.id, cs);
     this.ui.onChangesetUpdated(this.publicCs(cs), this.previewFor(cs));
     this.audit('proposed', cs);
 
-    return await new Promise<AgentOutcome>((resolve) => {
-      cs.resolve = resolve;
-      const onAbort = (): void => {
-        if (cs.settled || !(cs.status === 'proposed' || cs.status === 'reviewing')) return;
-        // FIX D: the human (or host) aborted the invocation — the ChangeSet is
-        // visibly 'cancelled', UI subscribers are notified, the agent promise
-        // settles exactly once.
-        cs.status = 'cancelled';
-        this.audit('cancelled', cs, { reason: 'agent_aborted' });
-        this.emitUpdate(cs);
-        this.settle(cs, {
-          status: 'cancelled',
-          changeSetId: cs.id,
-          appliedCount: 0,
-          amendedCount: 0,
-          skippedCount: 0,
-          undoAvailable: false,
-        });
-      };
-      if (signal.aborted) onAbort();
-      else signal.addEventListener('abort', onAbort, { once: true });
-    });
+    // FIX D: the human (or host) aborted the invocation — the ChangeSet is
+    // visibly 'cancelled', UI subscribers are notified, the agent promise
+    // settles exactly once.
+    const onAbort = (): void => this.cancelPending(cs, 'agent_aborted');
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    return await outcome;
   }
 
   /** Cherry-pick: include or exclude a single operation. Excluded ops are never applied. */
@@ -397,14 +398,14 @@ export class RediniGuard {
    */
   async commitChangeSet(csId: string): Promise<ChangeSetReceipt> {
     const cs = this.requireCs(csId);
-    const def = this.changesetDef(cs.tool);
     if (DECIDED_CHANGESET_STATUSES.includes(cs.status)) {
       throw new RediniError('ALREADY_DECIDED', `ChangeSet ${csId} is already ${cs.status}`);
     }
 
-    const appVersionChanged =
-      def.getStateVersion !== undefined && def.getStateVersion() !== cs.stateVersion;
-    if (appVersionChanged || this.mutationCounter !== cs.mutationIndex) {
+    // csIsStale tolerates a torn-down registration (only Redini's own counter
+    // guards then) — an orphaned pending ChangeSet reports the TRUTHFUL
+    // STALE_TRANSACTION instead of UNKNOWN_TOOL whenever the world moved.
+    if (this.csIsStale(cs)) {
       cs.status = 'stale';
       this.audit('stale', cs);
       this.emitUpdate(cs);
@@ -419,6 +420,7 @@ export class RediniGuard {
       });
       throw new RediniError('STALE_TRANSACTION', `ChangeSet ${csId} was proposed on a previous state`);
     }
+    const def = this.changesetDef(cs.tool);
 
     const included = cs.ops.filter((o) => o.included);
     if (included.length === 0) {
@@ -693,13 +695,7 @@ export class RediniGuard {
       };
       const cs = this.changeSets.get(entry.changeSetId);
       if (cs) cs.status = 'undo_failed';
-      this.ui.onAudit({
-        kind: 'undo_failed',
-        txId: entry.changeSetId,
-        tool: entry.tool,
-        at: this.now(),
-        detail,
-      });
+      this.audit('undo_failed', cs, detail);
       if (cs) this.emitUpdate(cs);
       // MELD: same conservative invalidation as the commit — the catch is
       // reachable only after >=1 inverse apply attempt, and a throwing apply
@@ -777,13 +773,7 @@ export class RediniGuard {
         cause,
       };
       const cs = this.changeSets.get(entry.changeSetId);
-      this.ui.onAudit({
-        kind: 'redo_failed',
-        txId: entry.changeSetId,
-        tool: entry.tool,
-        at: this.now(),
-        detail,
-      });
+      this.audit('redo_failed', cs, detail);
       if (cs) this.emitUpdate(cs);
       // MELD: same conservative invalidation as the commit — the catch is
       // reachable only after >=1 forward apply attempt, and a throwing apply
@@ -859,6 +849,59 @@ export class RediniGuard {
 
   // ---------- internals ----------
 
+  /**
+   * Keep the in-page registry consistent with the WebMCP registry on abort,
+   * so dynamic unregistration behaves the same with and without a model
+   * context — for BOTH safe and changeset tools (symmetric teardown).
+   */
+  private dropRegistrationOnAbort(name: string, signal: AbortSignal | undefined): void {
+    if (!signal) return;
+    // `registrations` is keyed by NAME and both register* methods overwrite
+    // unconditionally, so this listener has to prove the entry is still the one
+    // it was installed for. Without that, a stale signal deletes whichever
+    // registration currently holds the name — and now that teardown retracts
+    // proposals, it would also cancel a live negotiation belonging to a
+    // registration that was never aborted.
+    const owned = this.registrations.get(name);
+    const onAbort = (): void => {
+      if (this.registrations.get(name) !== owned) return;
+      this.registrations.delete(name);
+      // Deterministic teardown for ALREADY-PENDING ChangeSets. Without this a
+      // proposal outlives its own tool: csIsStale() is false while nothing else
+      // mutated, so the card still reads committable, and commitChangeSet()
+      // then throws UNKNOWN_TOOL WITHOUT settling the agent — a promise pending
+      // forever. Removing a tool retracts its open proposals, exactly as if the
+      // invocation itself had been aborted.
+      for (const cs of this.changeSets.values()) {
+        if (cs.tool === name) this.cancelPending(cs, 'tool_unregistered');
+      }
+    };
+    // An ALREADY-aborted signal never fires 'abort', so listening alone would
+    // leave the tool registered forever.
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  /**
+   * Retract one pending ChangeSet: visible 'cancelled' status, audit line, UI
+   * update, and the agent promise settled EXACTLY once. Idempotent, and a no-op
+   * on a ChangeSet that already reached a decision.
+   */
+  private cancelPending(cs: InternalChangeSet, reason: string): void {
+    if (cs.settled || !(cs.status === 'proposed' || cs.status === 'reviewing')) return;
+    cs.status = 'cancelled';
+    this.audit('cancelled', cs, { reason });
+    this.emitUpdate(cs);
+    this.settle(cs, {
+      status: 'cancelled',
+      changeSetId: cs.id,
+      appliedCount: 0,
+      amendedCount: 0,
+      skippedCount: 0,
+      undoAvailable: false,
+    });
+  }
+
   private requireCs(csId: string): InternalChangeSet {
     const cs = this.changeSets.get(csId);
     if (!cs) throw new RediniError('UNKNOWN_CHANGESET', `no ChangeSet "${csId}"`);
@@ -916,20 +959,40 @@ export class RediniGuard {
   }
 
   private previewFor(cs: InternalChangeSet): PreviewInfo {
-    const def = this.changesetDef(cs.tool);
-    const included = cs.ops
-      .filter((o) => o.included)
-      .map((o) => ({ kind: o.kind, params: structuredClone(o.params) }));
-    const simulated = def.runtime.simulate(included);
+    const included = cs.ops.filter((o) => o.included);
     const amendedCount = cs.ops.filter((o) => o.amended && o.included).length;
     const skippedCount = cs.ops.filter((o) => !o.included).length;
     const parts: string[] = [`${included.length}/${cs.ops.length} operation(s) will apply`];
     if (amendedCount > 0) parts.push(`${amendedCount} amended by you`);
     if (skippedCount > 0) parts.push(`${skippedCount} skipped by you`);
-    return {
-      summary: parts.join(' · '),
-      diff: { appliedPreview: simulated },
-    };
+    const summary = parts.join(' · ');
+
+    // The definition is resolved OUTSIDE the simulate guard on purpose: a
+    // missing registration is the ONLY reason allowed to cost us the diff
+    // silently. It is not unreachable — emitUpdate() only calls previewFor for
+    // LIVE cards, and a name can lose its changeset registration without the
+    // teardown path running (re-registering the same name as a safe tool). Such
+    // a ChangeSet is un-committable, so keep the counts truthful and let the
+    // commit report the real error.
+    let def: ChangeSetToolDefinition;
+    try {
+      def = this.changesetDef(cs.tool);
+    } catch {
+      return { summary };
+    }
+
+    try {
+      const simulated = def.runtime.simulate(
+        included.map((o) => ({ kind: o.kind, params: structuredClone(o.params) })),
+      );
+      return { summary, diff: { appliedPreview: simulated } };
+    } catch (e) {
+      // A simulator that throws is a BUG in the host app, never a teardown.
+      // Reporting it as a plain "no diff" would leave the human deciding blind
+      // on a preview that quietly emptied itself, which is exactly the
+      // guarantee this whole layer exists to provide. Surface it instead.
+      return { summary, error: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   private emitUpdate(cs: InternalChangeSet): void {

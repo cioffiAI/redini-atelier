@@ -768,6 +768,7 @@ describe('Redini v3 — ChangeSet gates', () => {
     const audit = f.ui.audit.find((a) => a.kind === 'undo_failed' && a.txId === csId);
     expect(audit?.detail?.attempted).toEqual(['op-3', 'op-2']);
     expect(audit?.detail?.remaining).toEqual(['op-1']);
+    expect(audit?.actor).toBe('agent'); // routed through this.audit() — provenance kept
     // partial replay happened exactly once: op-3's inverse restored x to 2
     expect(f.state.x).toBe(2);
     expect(f.guard.getChangeSet(csId)?.status).toBe('undo_failed');
@@ -1280,5 +1281,301 @@ describe('Redini v3 — ChangeSet gates', () => {
 
     await expect(f.guard.commitChangeSet(csB)).rejects.toMatchObject({ code: 'STALE_TRANSACTION' });
     expect(f.state.x).toBe(1);
+  });
+
+  it('45. abort teardown is symmetric: a torn-down changeset tool leaves the registry, its pending preview degrades (no diff), and OTHER commits never crash', async () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const state = { title: 'Hello', version: 0 };
+    const runtime: OperationRuntime = {
+      apply(op) {
+        const prev = state.title;
+        state.title = String(op.params.value);
+        state.version += 1;
+        return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+      },
+      simulate: (ops) => ({ title: String(ops.at(-1)?.params.value ?? state.title) }),
+    };
+    const ac = new AbortController();
+    guard.registerChangeSetTool({
+      name: 'doomed_tool',
+      description: 'Will be torn down.',
+      kinds: ['setText'],
+      runtime,
+      getStateVersion: () => state.version,
+    }, { signal: ac.signal });
+    guard.registerChangeSetTool({
+      name: 'keeper_tool',
+      description: 'Stays registered.',
+      kinds: ['setText'],
+      runtime,
+      getStateVersion: () => state.version,
+    });
+
+    // A pending proposal on the tool that is ABOUT to be torn down.
+    const pDoomed = guard.dispatch('doomed_tool', {
+      intent: 'pending on doomed',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'DOOMED' } }],
+    }) as Promise<AgentOutcome>;
+    pDoomed.catch(() => {});
+    const csDoomed = ui.lastChangeSetId();
+    expect(ui.changeSets.get(csDoomed)?.preview?.diff).toBeDefined();
+
+    // Teardown: the registration is gone — same as registerSafeTool on abort.
+    ac.abort();
+    await expect(
+      guard.dispatch('doomed_tool', { intent: 'x', operations: [{ kind: 'setText', params: { field: 'title', value: 'Y' } }] }),
+    ).rejects.toMatchObject({ code: 'UNKNOWN_TOOL' });
+
+    // Committing the OTHER tool must not crash in sweepPendingPreviews over the
+    // orphaned pending ChangeSet: its preview degrades to summary-only (no diff).
+    const pKeeper = guard.dispatch('keeper_tool', {
+      intent: 'keeper',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'KEPT' } }],
+    }) as Promise<AgentOutcome>;
+    pKeeper.catch(() => {});
+    const csKeeper = ui.lastChangeSetId();
+    await expect(guard.commitChangeSet(csKeeper)).resolves.toBeTruthy();
+    expect(state.title).toBe('KEPT');
+
+    // Teardown RETRACTS the proposal instead of orphaning it: the card is
+    // terminally 'cancelled' and a decided card carries no live preview.
+    const retracted = ui.changeSets.get(csDoomed);
+    expect(retracted?.changeset.status).toBe('cancelled');
+    expect(retracted?.preview).toBeNull();
+
+    // Every human path on a retracted ChangeSet is now the SAME deterministic
+    // refusal, and none of them can hang the agent.
+    expect(() => guard.amendOperation(csDoomed, 'op-1', { field: 'title', value: 'Z' })).toThrowError(
+      /ALREADY_DECIDED/,
+    );
+    await expect(guard.commitChangeSet(csDoomed)).rejects.toMatchObject({ code: 'ALREADY_DECIDED' });
+    expect(await pDoomed).toMatchObject({ status: 'cancelled', changeSetId: csDoomed });
+    expect(await pKeeper).toMatchObject({ status: 'committed', changeSetId: csKeeper });
+  });
+
+  it('46. a THROWING simulate is never reported as "no diff": the registration is intact, so the preview carries the error instead of quietly emptying', async () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const state = { title: 'Hello', version: 0 };
+    let simulateBroken = true;
+    guard.registerChangeSetTool({
+      name: 'flaky_preview',
+      description: 'Its simulator throws; its apply works.',
+      kinds: ['setText'],
+      getStateVersion: () => state.version,
+      runtime: {
+        apply(op) {
+          const prev = state.title;
+          state.title = String(op.params.value);
+          state.version += 1;
+          return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+        },
+        simulate: (ops) => {
+          if (simulateBroken) throw new Error('simulator exploded');
+          return { title: String(ops.at(-1)?.params.value ?? state.title) };
+        },
+      },
+    });
+
+    const p = guard.dispatch('flaky_preview', {
+      intent: 'preview will fail',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'NEW' } }],
+    }) as Promise<AgentOutcome>;
+    p.catch(() => {});
+    const csId = ui.lastChangeSetId();
+
+    // The distinction the whole fix exists for: a broken simulator and a torn
+    // down tool BOTH lose the diff, but only one of them is silent.
+    const preview = ui.changeSets.get(csId)?.preview;
+    expect(preview?.diff).toBeUndefined();
+    expect(preview?.error).toBe('simulator exploded');
+    // The counts never lied and still do not.
+    expect(preview?.summary).toContain('1/1 operation(s) will apply');
+
+    // The failure is per-emit, not sticky: fix the simulator, amend, and the
+    // diff comes back with no error attached.
+    simulateBroken = false;
+    const after = guard.amendOperation(csId, 'op-1', { field: 'title', value: 'FIXED' }).preview;
+    expect(after).not.toBeNull();
+    expect(after?.error).toBeUndefined();
+    expect(after?.diff).toEqual({ appliedPreview: { title: 'FIXED' } });
+
+    await expect(guard.commitChangeSet(csId)).resolves.toBeTruthy();
+    expect(state.title).toBe('FIXED');
+    expect(await p).toMatchObject({ status: 'committed', appliedCount: 1 });
+  });
+
+  it('47. tearing down a tool with a pending ChangeSet and NO other mutation settles the agent instead of orphaning it', async () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const state = { title: 'Hello', version: 0 };
+    const ac = new AbortController();
+    guard.registerChangeSetTool({
+      name: 'lonely_tool',
+      description: 'The only tool; nothing else will ever mutate the world.',
+      kinds: ['setText'],
+      getStateVersion: () => state.version,
+      runtime: {
+        apply(op) {
+          const prev = state.title;
+          state.title = String(op.params.value);
+          state.version += 1;
+          return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+        },
+        simulate: (ops) => ({ title: String(ops.at(-1)?.params.value ?? state.title) }),
+      },
+    }, { signal: ac.signal });
+
+    const p = guard.dispatch('lonely_tool', {
+      intent: 'pending forever?',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'NEVER' } }],
+    }) as Promise<AgentOutcome>;
+    p.catch(() => {});
+    const csId = ui.lastChangeSetId();
+    expect(ui.changeSets.get(csId)?.changeset.status).toBe('proposed');
+
+    // Teardown with NOTHING else happening. This is the gap: the state version
+    // is untouched and Redini's own mutation counter never moved, so the old
+    // csIsStale() said "fresh" and commitChangeSet() went on to throw
+    // UNKNOWN_TOOL without ever settling the agent.
+    ac.abort();
+    expect(state.version).toBe(0);
+
+    // The promise is settled by the teardown itself. If this ever regresses the
+    // test hangs rather than fails, which is precisely the bug's signature.
+    expect(await p).toMatchObject({ status: 'cancelled', changeSetId: csId, appliedCount: 0 });
+    expect(ui.changeSets.get(csId)?.changeset.status).toBe('cancelled');
+    expect(ui.audit.some((a) => a.kind === 'cancelled' && a.detail?.reason === 'tool_unregistered')).toBe(true);
+
+    // And the human path agrees: no committable ghost left behind.
+    await expect(guard.commitChangeSet(csId)).rejects.toMatchObject({ code: 'ALREADY_DECIDED' });
+    expect(state.title).toBe('Hello');
+  });
+
+  it('48. an ALREADY-aborted registration signal is refused by BOTH registries, never half-registered', async () => {
+    const ui = new InMemoryUI();
+    const hostTools: string[] = [];
+    const modelContext: ModelContextLike = {
+      registerTool: (tool: { name: string }) => {
+        hostTools.push(tool.name);
+        return { unregister: () => {} };
+      },
+    } as unknown as ModelContextLike;
+    const guard = createGuard({ ui, modelContext });
+    const ac = new AbortController();
+    ac.abort();
+
+    guard.registerChangeSetTool({
+      name: 'stillborn',
+      description: 'Registered with a signal that is already aborted.',
+      kinds: ['setText'],
+      runtime: { apply: (op) => op, simulate: () => ({}) },
+    }, { signal: ac.signal });
+    guard.registerSafeTool({
+      name: 'stillborn_safe',
+      description: 'Same, read-only.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: () => ({}),
+    }, { signal: ac.signal });
+
+    // 'abort' never fires again for a spent signal, so registering and THEN
+    // listening left the host advertising a tool the guard had dropped. Both
+    // registries must simply refuse it.
+    expect(hostTools).toEqual([]);
+    await expect(
+      guard.dispatch('stillborn', { intent: 'x', operations: [{ kind: 'setText', params: { value: 'y' } }] }),
+    ).rejects.toMatchObject({ code: 'UNKNOWN_TOOL' });
+    await expect(guard.dispatch('stillborn_safe', {})).rejects.toMatchObject({ code: 'UNKNOWN_TOOL' });
+  });
+
+  it('49. a host adapter that tears the tool down FROM onChangesetUpdated still settles the agent (no null-resolver strand)', async () => {
+    const rec = new InMemoryUI();
+    const ac = new AbortController();
+    const state = { title: 'Hello', version: 0 };
+    let fired = false;
+    // The teardown lands DURING dispatch's staging window, before the promise
+    // executor would have assigned cs.resolve. settle() used to burn cs.settled
+    // against a null resolver: card terminally 'cancelled', agent hung forever,
+    // every recovery path short-circuiting on that same flag.
+    const ui = {
+      onChangesetUpdated(cs: Parameters<InMemoryUI['onChangesetUpdated']>[0], pv: Parameters<InMemoryUI['onChangesetUpdated']>[1]) {
+        rec.onChangesetUpdated(cs, pv);
+        if (!fired && cs.status === 'proposed') {
+          fired = true;
+          ac.abort();
+        }
+      },
+      onReceipt: (r: Parameters<InMemoryUI['onReceipt']>[0]) => rec.onReceipt(r),
+      onUndo: (e: Parameters<InMemoryUI['onUndo']>[0]) => rec.onUndo(e),
+      onRedo: (e: Parameters<InMemoryUI['onRedo']>[0]) => rec.onRedo(e),
+      onAudit: (e: Parameters<InMemoryUI['onAudit']>[0]) => rec.onAudit(e),
+    };
+    const guard = createGuard({ ui });
+    guard.registerChangeSetTool({
+      name: 'reentrant',
+      description: 'Torn down re-entrantly from the first emit.',
+      kinds: ['setText'],
+      getStateVersion: () => state.version,
+      runtime: {
+        apply(op) {
+          const prev = state.title;
+          state.title = String(op.params.value);
+          state.version += 1;
+          return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+        },
+        simulate: (ops) => ({ title: String(ops.at(-1)?.params.value ?? state.title) }),
+      },
+    }, { signal: ac.signal });
+
+    const p = guard.dispatch('reentrant', {
+      intent: 'staged while its tool is torn down',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'NEW' } }],
+    }) as Promise<AgentOutcome>;
+    p.catch(() => {});
+
+    const settled = await Promise.race([p, new Promise((r) => setTimeout(() => r('HUNG'), 100))]);
+    expect(settled).not.toBe('HUNG');
+    expect(settled).toMatchObject({ status: 'cancelled' });
+    expect(fired).toBe(true);
+    expect(state.title).toBe('Hello');
+  });
+
+  it('50. a stale registration signal cannot retract a proposal belonging to the registration that replaced it', async () => {
+    const ui = new InMemoryUI();
+    const guard = createGuard({ ui });
+    const state = { title: 'Hello', version: 0 };
+    const runtime: OperationRuntime = {
+      apply(op) {
+        const prev = state.title;
+        state.title = String(op.params.value);
+        state.version += 1;
+        return { id: op.id, kind: 'setText', label: op.label, params: { field: 'title', value: prev } };
+      },
+      simulate: (ops) => ({ title: String(ops.at(-1)?.params.value ?? state.title) }),
+    };
+    const a = new AbortController();
+    const b = new AbortController();
+    const def = { description: 'Re-registered under the same name.', kinds: ['setText'], runtime, getStateVersion: () => state.version };
+    guard.registerChangeSetTool({ name: 'twice', ...def }, { signal: a.signal });
+    guard.registerChangeSetTool({ name: 'twice', ...def }, { signal: b.signal });
+
+    const p = guard.dispatch('twice', {
+      intent: 'staged under registration B',
+      operations: [{ kind: 'setText', params: { field: 'title', value: 'FROM_B' } }],
+    }) as Promise<AgentOutcome>;
+    p.catch(() => {});
+    const csId = ui.lastChangeSetId();
+
+    // A's listener must recognise that it no longer owns the name. Without the
+    // identity check it deleted B's live registration AND force-cancelled a
+    // negotiation nobody aborted, lying to human and agent at once.
+    a.abort();
+    expect(b.signal.aborted).toBe(false);
+    expect(ui.changeSets.get(csId)?.changeset.status).toBe('proposed');
+
+    await expect(guard.commitChangeSet(csId)).resolves.toBeTruthy();
+    expect(state.title).toBe('FROM_B');
+    expect(await p).toMatchObject({ status: 'committed', appliedCount: 1 });
   });
 });

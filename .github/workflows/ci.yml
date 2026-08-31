@@ -1,12 +1,14 @@
 # CI — unit tests + production build.
 # Browser E2E (scripts/atelier-e2e.mjs) requires Chrome 149+ launched with the
-# WebMCP flag (--enable-features=WebMCP) and runs outside CI — see README
-# "E2E troubleshooting" for the manual procedure.
+# WebMCP flag (--enable-features=WebMCP) and runs outside CI: it drives the real
+# WebMCP tool path behind an experimental flag that tracks Chrome's release
+# channel, so wiring it to a hosted runner would buy a red badge that tracks
+# Chrome rather than this repo. It stays a local gate — see README "How to run".
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
 
 jobs:
@@ -21,6 +23,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # `npm run build` is `tsc && vite build`, so this covers type checking too.
       - run: npm test
       - run: npm run build
       # Backs the README/design-doc claim: the deploy headers ship verbatim in

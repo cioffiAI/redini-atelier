@@ -16,8 +16,12 @@
   --border: #e4dfd5;
   --border-strong: #d2cbbd;
   --text: #23211d;
-  --text-muted: #6f6a60;
-  --text-faint: #80796c;
+  /* The two secondary inks carry the whole small-text layer (0.62-0.78rem), so
+     both clear 4.5:1 against EVERY surface token in this file, not just the one
+     they happen to sit on today: worst case muted 5.71:1, faint 4.56:1 (WCAG
+     1.4.3 AA). Lightening either one re-breaks ~12 call sites at once. */
+  --text-muted: #635d52;
+  --text-faint: #726c5f;
 
   --accent: #b0532c;
   --accent-soft: #fdf3e9;
@@ -66,7 +70,11 @@ button { font: inherit; }
   z-index: 10;
   display: flex;
   align-items: center;
+  /* Wraps on its own when brand + history + status stop fitting, so the bar
+     never needs a breakpoint of its own. */
+  flex-wrap: wrap;
   gap: 1.1rem;
+  row-gap: 0.5rem;
   padding: 0.55rem 1.5rem;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -163,12 +171,15 @@ main {
    Poster canvas (the visual focus)
 --------------------------------------------------------------------------- */
 
+/* The poster keeps its 640x400 LOGICAL canvas (CANVAS_W/CANVAS_H drive the
+   store bounds and the amendment min/max) and scales as one piece: the ratio is
+   pinned here, the logo badge renders in cqw, the type in clamp(). A change to
+   this ratio must match CANVAS_W/CANVAS_H in src/atelier/store.ts. */
 .flyer {
   position: relative;
   width: 100%;
   max-width: 640px;
-  height: 400px;
-  min-height: 380px;
+  aspect-ratio: 640 / 400;
   background: #fffdf8;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -178,13 +189,13 @@ main {
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 2rem;
+  padding: clamp(1rem, 6cqw, 2rem);
   overflow: hidden;
 }
 
-.flyer h2 { font-size: 2rem; margin: 0 0 0.5rem; }
-.flyer p { margin: 0.25rem 0; color: inherit; opacity: 0.85; }
-.flyer-date { font-size: 0.9rem; }
+.flyer h2 { font-size: clamp(1.25rem, 5cqw, 2rem); margin: 0 0 0.5rem; }
+.flyer p { margin: 0.25rem 0; color: inherit; opacity: 0.85; font-size: clamp(0.8rem, 2.5cqw, 1rem); }
+.flyer-date { font-size: clamp(0.72rem, 2.2cqw, 0.9rem); }
 
 .logo-badge {
   position: absolute;
@@ -198,7 +209,10 @@ main {
 
 .flyer-text { position: relative; z-index: 1; }
 
-#flyer-wrap { position: relative; width: 100%; max-width: 640px; }
+/* Query container for BOTH the committed flyer and the ghost: cqw inside them
+   resolves against the poster width, so preview and committed state scale
+   identically at every viewport. */
+#flyer-wrap { position: relative; width: 100%; max-width: 640px; container-type: inline-size; }
 
 /* Staged preview coherence: while the ghost is shown, the committed flyer is
    hidden (visibility keeps the DOM text readable for tests/assertions) so the
@@ -407,10 +421,14 @@ main {
 /* Skipped rows: visibly muted, still complete (badge + would-be value). */
 .tx-op-skipped { opacity: 0.62; background: var(--surface-soft); border-style: dashed; }
 
+/* Including/excluding an operation is THE decision this product exists for, and
+   it was the smallest target on the surface. 1.5rem = 24px, WCAG 2.2 SC 2.5.8
+   (AA) minimum: the spacing exception does not apply, the edit button sits
+   0.5rem away. */
 .tx-op input[type="checkbox"] {
   flex: none;
-  width: 0.95rem;
-  height: 0.95rem;
+  width: 1.5rem;
+  height: 1.5rem;
   margin: 0;
   accent-color: var(--ok);
   cursor: pointer;
@@ -456,7 +474,8 @@ main {
 .op-edit-btn {
   flex: none;
   font-size: 0.7rem;
-  padding: 0.16rem 0.55rem;
+  /* 24px tall, same SC 2.5.8 floor as the checkbox next to it. */
+  padding: 0.3rem 0.6rem;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   background: var(--surface);
@@ -468,13 +487,14 @@ main {
 
 /* Typed amendment forms (FIX O) */
 
+/* The amendment form reads as "you are editing this" through the accent-tinted
+   ground and full accent border, not a side stripe. */
 .tx-edit-form {
   margin-top: 0.4rem;
   padding: 0.65rem 0.7rem;
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent);
+  border: 1px solid var(--accent-border);
   border-radius: 8px;
-  background: var(--surface-soft);
+  background: var(--accent-soft);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -559,7 +579,9 @@ main {
   align-items: baseline;
   gap: 0.6rem;
 }
-.err-code { font-size: 0.64rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #b07a73; margin-left: auto; white-space: nowrap; }
+/* The error code is the diagnostic half of the message: whoever needs it is
+   whoever is struggling to read. 4.78:1 on --danger-soft, at 0.64rem. */
+.err-code { font-size: 0.64rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #96594f; margin-left: auto; white-space: nowrap; }
 
 .tx-stale-note {
   margin-top: 0.5rem;
@@ -682,3 +704,37 @@ main {
 }
 .dev-details ul li { padding: 0.14rem 0; border-bottom: 1px dashed var(--border); overflow-wrap: anywhere; }
 .dev-details ul li:last-child { border-bottom: none; }
+
+/* ---------------------------------------------------------------------------
+   Narrow viewports
+   The negotiation column is 360px and the poster wants 640: below ~860px there
+   is no honest two-column split left, so the panel moves UNDER the canvas
+   rather than squeezing it. Order stays canvas-then-panel in both layouts, so
+   the DOM order and the reading order never diverge.
+--------------------------------------------------------------------------- */
+
+@media (max-width: 860px) {
+  main {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.1rem;
+    padding: 1.1rem 1rem 2rem;
+  }
+  /* The panel is a full-width block down here, not a sidebar. */
+  #guardrail-panel { max-width: 640px; width: 100%; margin: 0 auto; }
+  #change-queue { max-height: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion
+   Every transition here is state feedback (hover, focus, commit), never
+   choreography, so honouring the preference costs nothing but the fade.
+--------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

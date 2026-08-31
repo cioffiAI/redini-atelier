@@ -1,5 +1,18 @@
 import type { AtelierStore, FlyerDesign } from './store';
+import { CANVAS_W } from './store';
 import { templates } from './templates';
+
+/**
+ * Logical canvas px → container-query units. Operations keep speaking in the
+ * 640x400 coordinate space (store bounds, amendment min/max, receipts); only
+ * the RENDERING is proportional, so the poster scales as one piece on narrow
+ * viewports instead of clipping the logo off its right edge.
+ *
+ * `top` divides by CANVAS_W too, and that is not a typo: .flyer carries
+ * aspect-ratio 640/400, so one cqw is worth the same number of logical px
+ * vertically as horizontally.
+ */
+const cq = (v: number): string => `${(v / CANVAS_W) * 100}cqw`;
 
 /**
  * Atelier DOM rendering: flyer canvas (+ staged ghost preview) and template
@@ -28,11 +41,11 @@ export function initAtelierUI(
     const logo = document.createElement('div');
     logo.className = 'logo-badge';
     logo.textContent = '★';
-    logo.style.left = `${d.logo.x}px`;
-    logo.style.top = `${d.logo.y}px`;
-    logo.style.width = `${d.logo.size}px`;
-    logo.style.height = `${d.logo.size}px`;
-    logo.style.fontSize = `${Math.round(d.logo.size * 0.5)}px`;
+    logo.style.left = cq(d.logo.x);
+    logo.style.top = cq(d.logo.y);
+    logo.style.width = cq(d.logo.size);
+    logo.style.height = cq(d.logo.size);
+    logo.style.fontSize = cq(d.logo.size * 0.5);
     logo.style.color = d.textColor;
     target.appendChild(logo);
 
@@ -49,10 +62,13 @@ export function initAtelierUI(
     target.appendChild(box);
   }
 
-  function render(): void {
-    paintFlyer(flyerEl, store.design);
-
-    tplListEl.innerHTML = '';
+  /**
+   * The gallery is static, so it is built ONCE, outside the store subscription.
+   * Rebuilding it on every design change used to blow away the focused button:
+   * a commit landing while someone was tabbing through the templates dropped
+   * focus back to <body>.
+   */
+  function renderTemplates(): void {
     for (const t of templates) {
       const li = document.createElement('li');
       const btn = document.createElement('button');
@@ -68,7 +84,12 @@ export function initAtelierUI(
     }
   }
 
-  store.onChange(() => render());
+  function render(): void {
+    paintFlyer(flyerEl, store.design);
+  }
+
+  store.onChange(render);
+  renderTemplates();
   render();
 
   return {

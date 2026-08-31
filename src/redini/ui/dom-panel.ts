@@ -703,6 +703,22 @@ export function createDomPanel(
     card.append(head, sub, opsBox);
 
     if (!terminal) {
+      // A preview that could not be computed must SAY so. Rendering the card
+      // without its diff and without this note is the silent-empty-preview
+      // failure the guard now refuses to produce: the human would read an
+      // unremarkable card and commit on a simulation that never ran.
+      const previewError = states.get(cs.id)?.preview?.error;
+      if (previewError) {
+        const note = document.createElement('div');
+        note.className = 'tx-error';
+        note.textContent =
+          'Preview unavailable — this proposal could not be simulated, so nothing shown here is what would actually apply.';
+        const detail = document.createElement('span');
+        detail.className = 'err-code';
+        detail.textContent = previewError;
+        note.appendChild(detail);
+        card.appendChild(note);
+      }
       if (cs.isStale) {
         const staleNote = document.createElement('div');
         staleNote.className = 'tx-stale-note';
