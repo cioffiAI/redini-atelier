@@ -149,7 +149,7 @@ If an `apply` fails:
 2. If ALL inverses succeed: state `failed`, audit `failed {error, rolledBack: <real successes>}`, agent promise → `execute_failed` with `error.code: EXECUTION_FAILED`, thrown to the UI caller `RediniError('EXECUTION_FAILED', msg, cause)`.
 3. If ONE inverse fails: stop, state `failed`, audit `failed {error, rolledBack: <successes so far>, rollbackFailed: true, failedCompensation: <id>}`, agent promise → `execute_failed` with `error.code: ROLLBACK_FAILED`, thrown `RediniError('ROLLBACK_FAILED', ..., {appliedOperations, compensatedOperations, failedCompensation, cause})`. **No false rolledBack count.**
 4. The agent's promise is unblocked EXACTLY ONCE on all paths.
-5. MELD: Redini **does not assume apply is failure-atomic**. Every `runtime.apply` attempted in a failed commit/undo/redo conservatively invalidates the pending proposals (bump of the `mutationCounter`), regardless of whether an inverse was returned (an apply can mutate state and throw WITHOUT returning the inverse).
+5. Redini **does not assume apply is failure-atomic**. Every `runtime.apply` attempted in a failed commit/undo/redo conservatively invalidates the pending proposals (bump of the `mutationCounter`), regardless of whether an inverse was returned (an apply can mutate state and throw WITHOUT returning the inverse).
 
 **Special case EMPTY_CHANGESET**: committing an all-skipped ChangeSet is a human-UI
 error, NOT an agent error: the promise is NOT unblocked, the ChangeSet stays
