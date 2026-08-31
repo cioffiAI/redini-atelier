@@ -1,0 +1,28 @@
+# CI — unit tests + production build.
+# Browser E2E (scripts/atelier-e2e.mjs) requires Chrome 149+ launched with the
+# WebMCP flag (--enable-features=WebMCP) and runs outside CI — see README
+# "E2E troubleshooting" for the manual procedure.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      # Backs the README/design-doc claim: the deploy headers ship verbatim in
+      # dist/ (Vite copies public/_headers) — fail the build if they drift.
+      - run: grep -q "Origin-Agent-Cluster" dist/_headers

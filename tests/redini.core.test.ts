@@ -1176,7 +1176,12 @@ describe('Redini v3 — ChangeSet gates', () => {
 
   it('42. failed commit WITHOUT inverse (apply mutates then throws, no getStateVersion): conservative bump invalidates pending B', async () => {
     const f = createFailureFixture({ withStateVersion: false });
-    const csA = f.propose([{ kind: 'mutateAndThrows', params: { x: 5 } }]);
+    const pA = f.guard.dispatch('flaky_design_update', {
+      intent: 'mutates then throws',
+      operations: [{ kind: 'mutateAndThrows', params: { x: 5 } }],
+    }) as Promise<AgentOutcome>;
+    pA.catch(() => {});
+    const csA = f.ui.lastChangeSetId();
     const pB = f.guard.dispatch('flaky_design_update', {
       intent: 'pending B',
       operations: [{ kind: 'ok', params: { x: 9 } }],
@@ -1191,6 +1196,20 @@ describe('Redini v3 — ChangeSet gates', () => {
     expect(err).toMatchObject({ name: 'RediniError', code: 'EXECUTION_FAILED' });
     expect(f.state.x).toBe(5);
     expect(f.guard.getChangeSet(csA)?.status).toBe('failed');
+
+    // Honest atomicity: the outcome is state-uncertain — NEVER a plain false
+    // "appliedCount 0 / nothing was committed" claim when the world changed.
+    expect(await pA).toMatchObject({
+      status: 'execute_failed',
+      changeSetId: csA,
+      appliedCount: 0,
+      stateUncertain: true,
+    });
+    // The public ChangeSet views (guard + UI copy) carry the flag too…
+    expect(f.guard.getChangeSet(csA)?.stateUncertain).toBe(true);
+    expect(f.ui.changeSets.get(csA)?.changeset.stateUncertain).toBe(true);
+    // …and the failed audit detail reports it (the UI branches its copy on it).
+    expect(f.ui.audit.find((a) => a.kind === 'failed' && a.txId === csA)?.detail?.stateUncertain).toBe(true);
 
     // Any ATTEMPTED apply conservatively bumps the internal counter (no app
     // version exists to notice the mutation): B is stale in BOTH views.

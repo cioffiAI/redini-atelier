@@ -1,6 +1,6 @@
 import { RediniError } from './errors';
 import { deepEqual } from './utils';
-import { DECIDED_CHANGESET_STATUSES } from './types';
+import { CHANGESET_LIMITS, DECIDED_CHANGESET_STATUSES } from './types';
 import type {
   AgentOutcome,
   AuditEntry,
@@ -52,6 +52,8 @@ interface InternalChangeSet {
   committedAt: number | null;
   resolve: ((outcome: AgentOutcome) => void) | null;
   settled: boolean;
+  /** Set ONLY on failure paths where the world MAY be partially changed. */
+  stateUncertain?: boolean;
 }
 
 export interface GuardOptions {
@@ -223,9 +225,18 @@ export class RediniGuard {
     if (!intent) {
       throw new RediniError('INVALID_OPERATION', 'the ChangeSet needs an "intent" string');
     }
+    if (intent.length > CHANGESET_LIMITS.maxIntentLength) {
+      throw new RediniError(
+        'INVALID_OPERATION',
+        `intent too long (max ${CHANGESET_LIMITS.maxIntentLength} characters)`,
+      );
+    }
     const rawOps = Array.isArray(input?.operations) ? (input.operations as Array<Record<string, unknown>>) : [];
     if (rawOps.length === 0) {
       throw new RediniError('INVALID_OPERATION', 'the ChangeSet has no operations');
+    }
+    if (rawOps.length > CHANGESET_LIMITS.maxOps) {
+      throw new RediniError('INVALID_OPERATION', `too many operations (max ${CHANGESET_LIMITS.maxOps})`);
     }
 
     const ops: InternalOp[] = rawOps.map((raw, i) => {
@@ -240,7 +251,16 @@ export class RediniGuard {
       if (!def.kinds.includes(kind)) {
         throw new RediniError('INVALID_OPERATION', `operation ${i + 1}: unknown kind "${kind}"`);
       }
-      const validationError = def.validate?.({ kind, params });
+      // Validator context: the raw ops validated so far (current params, in
+      // order) so a sequential rule (e.g. derived logo bounds) is evaluated
+      // against the same derived state the op will actually apply on.
+      const validationError = def.validate?.(
+        { kind, params },
+        rawOps.slice(0, i).map((r) => ({
+          kind: String(r?.kind ?? ''),
+          params: (r?.params as Record<string, unknown> | undefined) ?? {},
+        })),
+      );
       if (validationError) {
         throw new RediniError('INVALID_OPERATION', `operation ${i + 1}: ${validationError}`);
       }
@@ -336,7 +356,16 @@ export class RediniGuard {
     if (typeof params !== 'object' || params === null || Array.isArray(params)) {
       throw new RediniError('INVALID_AMENDMENT', `operation ${opId}: amendment params must be a plain object`);
     }
-    const validationError = this.changesetDef(cs.tool).validate?.({ kind: op.kind, params });
+    // Amendment validation runs against the SAME derived state the commit will
+    // apply on: the prior INCLUDED ops (their CURRENT params, in order).
+    const priorIncluded = cs.ops
+      .slice(0, cs.ops.findIndex((o) => o.id === opId))
+      .filter((o) => o.included)
+      .map((o) => ({ kind: o.kind, params: structuredClone(o.params) }));
+    const validationError = this.changesetDef(cs.tool).validate?.(
+      { kind: op.kind, params },
+      priorIncluded,
+    );
     if (validationError) {
       throw new RediniError('INVALID_AMENDMENT', `operation ${opId}: ${validationError}`);
     }
@@ -398,6 +427,29 @@ export class RediniGuard {
       throw new RediniError('EMPTY_CHANGESET', 'every operation was skipped: nothing to commit');
     }
 
+    // COMMIT-TIME CHAIN RE-VALIDATION: dispatch-time validation is early
+    // feedback; the included chain is re-validated at commit because skip/amend
+    // can change the derived state after per-op validation — skipping an
+    // earlier resize means a later move commits against the LIVE state, and an
+    // amended parameter can push a later op off-canvas. Each included op is
+    // validated against the accumulated PRIOR INCLUDED context (current params,
+    // in order) — exactly the derived state the commit will apply on. Any
+    // failure throws INVALID_OPERATION BEFORE any mutation, WITHOUT settling
+    // the agent promise and WITHOUT changing the changeset status (stays
+    // 'reviewing' — the human can amend/skip and retry, same semantics as
+    // EMPTY_CHANGESET).
+    const revalidatedPrior: Array<{ kind: string; params: Record<string, unknown> }> = [];
+    for (const op of included) {
+      const validationError = def.validate?.(
+        { kind: op.kind, params: structuredClone(op.params) },
+        revalidatedPrior.map((p) => ({ kind: p.kind, params: structuredClone(p.params) })),
+      );
+      if (validationError) {
+        throw new RediniError('INVALID_OPERATION', `operation ${op.id}: ${validationError}`);
+      }
+      revalidatedPrior.push({ kind: op.kind, params: structuredClone(op.params) });
+    }
+
     const stateVersionBefore = cs.stateVersion;
     const inverses: Operation[] = [];
     const appliedIds: string[] = [];
@@ -422,7 +474,7 @@ export class RediniGuard {
       }
     } catch (e) {
       // Atomic: compensate what was already applied, in reverse order, tracking
-      // each success. If every compensation succeeds the commit failed cleanly
+      // each success. If every compensation succeeds the rollback completed
       // (EXECUTION_FAILED). If a compensation itself fails we surface
       // ROLLBACK_FAILED with the exact partial state — no false rolledBack count.
       const compensated: string[] = [];
@@ -438,6 +490,12 @@ export class RediniGuard {
       }
       for (const op of included) op.status = 'failed';
       const message = e instanceof Error ? e.message : String(e);
+      // An apply was attempted and did not complete — it may have mutated
+      // state without returning an inverse, so the resulting application state
+      // is UNCERTAIN even when the completed prefix compensates cleanly.
+      // Redini never claims "nothing happened" without certainty: every
+      // failed commit is state-uncertain by construction.
+      cs.stateUncertain = true;
       cs.status = 'failed';
       this.emitUpdate(cs);
       // MELD: a failed commit conservatively invalidates pending proposals.
@@ -454,6 +512,7 @@ export class RediniGuard {
           rolledBack: compensated.length,
           rollbackFailed: true,
           failedCompensation: rollbackFailure.id,
+          stateUncertain: true,
         });
         this.settle(cs, {
           status: 'execute_failed',
@@ -462,6 +521,7 @@ export class RediniGuard {
           amendedCount: 0,
           skippedCount: 0,
           undoAvailable: false,
+          stateUncertain: true,
           error: { code: 'ROLLBACK_FAILED', message },
         });
         throw new RediniError(
@@ -475,7 +535,11 @@ export class RediniGuard {
           },
         );
       }
-      this.audit('failed', cs, { error: message, rolledBack: compensated.length });
+      this.audit('failed', cs, {
+        error: message,
+        rolledBack: compensated.length,
+        stateUncertain: cs.stateUncertain === true,
+      });
       this.settle(cs, {
         status: 'execute_failed',
         changeSetId: cs.id,
@@ -483,6 +547,7 @@ export class RediniGuard {
         amendedCount: 0,
         skippedCount: 0,
         undoAvailable: false,
+        stateUncertain: true,
         error: { code: 'EXECUTION_FAILED', message },
       });
       throw new RediniError('EXECUTION_FAILED', message, e);
@@ -844,6 +909,9 @@ export class RediniGuard {
       proposedAt: cs.proposedAt,
       committedAt: cs.committedAt,
       isStale: this.csIsStale(cs),
+      // Passed through only when set: a clean failure carries NO claim either
+      // way, and a successful commit never sets the flag.
+      ...(cs.stateUncertain === true ? { stateUncertain: true as const } : {}),
     };
   }
 

@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createGuard } from '../src/redini/guard';
 import { InMemoryUI } from '../src/redini/ui/in-memory';
-import type { ModelContextLike } from '../src/redini/types';
+import type { AgentOutcome, ModelContextLike } from '../src/redini/types';
 import { AtelierStore } from '../src/atelier/store';
 import type { FlyerDesign } from '../src/atelier/store';
 import { registerAtelierTools } from '../src/atelier/tools';
@@ -388,5 +388,284 @@ describe('Atelier — design_update ChangeSet over Redini', () => {
     expect(f.store.design.title).toBe('B');
     void csA;
     void csB;
+  });
+
+  it('failure-isolated store emit: a throwing listener cannot break Atelier apply — commit SUCCEEDS with correct state', async () => {
+    const f = setup();
+    // A UI listener that throws on EVERY store change. Without emit isolation
+    // this would break failure-atomicity: apply() mutates → emits (throw after
+    // mutation) → never builds the inverse → the commit reports a failure over
+    // a changed world. With isolation the apply completes and commit succeeds.
+    f.store.onChange(() => {
+      throw new Error('listener boom');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const csId = f.propose('Listener isolation', [
+        { kind: 'setText', params: { field: 'title', value: 'SAFE' } },
+        { kind: 'move', params: { x: 40, y: 40 } },
+      ]);
+      const receipt = await f.guard.commitChangeSet(csId);
+      expect(f.store.design.title).toBe('SAFE');
+      expect(f.store.design.logo).toEqual({ x: 40, y: 40, size: 72 });
+      expect(receipt.applied.map((r) => r.id)).toEqual(['op-1', 'op-2']);
+      expect(f.guard.getChangeSet(csId)?.status).toBe('committed');
+      // The listener error surfaced as a warning only — never rethrown, never
+      // an unhandled rejection.
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ChangeSet size caps (DoS): 33 ops, 201-char intent and 121-char values rejected at dispatch; boundaries pass', async () => {
+    const f = setup();
+    // 33 operations → INVALID_OPERATION (the 33rd is never even staged).
+    const ops33 = Array.from({ length: 33 }, (_, i) => ({
+      kind: 'setText' as const,
+      params: { field: 'title', value: `v${i}` },
+    }));
+    await expect(
+      f.guard.dispatch('design_update', { intent: 'x', operations: ops33 }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+    // Boundary: exactly 32 operations are fine (built programmatically).
+    const cs32 = f.propose('32 ops boundary', ops33.slice(0, 32));
+    expect(f.guard.getChangeSet(cs32)?.status).toBe('proposed');
+
+    // 201-char intent → INVALID_OPERATION; boundary 200 passes.
+    await expect(
+      f.guard.dispatch('design_update', {
+        intent: 'a'.repeat(201),
+        operations: [{ kind: 'setText', params: { field: 'title', value: 'x' } }],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+    const cs200 = f.propose('b'.repeat(200), [
+      { kind: 'setText', params: { field: 'title', value: 'x' } },
+    ]);
+    expect(f.guard.getChangeSet(cs200)?.status).toBe('proposed');
+
+    // 121-char setText value → INVALID_OPERATION; boundary 120 passes.
+    await expect(
+      f.guard.dispatch('design_update', {
+        intent: 'x',
+        operations: [{ kind: 'setText', params: { field: 'title', value: 'a'.repeat(121) } }],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+    const cs120 = f.propose('120 value', [
+      { kind: 'setText', params: { field: 'title', value: 'a'.repeat(120) } },
+    ]);
+    expect(f.guard.getChangeSet(cs120)?.status).toBe('proposed');
+  });
+
+  it('logo bounds are validated on the SEQUENTIAL derived state at dispatch', async () => {
+    const f = setup();
+    // The old rule accepted (640,400) — the whole logo (default size 72) ends
+    // up fully outside. Now: x + size ≤ 640 and y + size ≤ 400 on the derived state.
+    await expect(
+      f.guard.dispatch('design_update', {
+        intent: 'x',
+        operations: [{ kind: 'move', params: { x: 640, y: 400 } }],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+    // move (600,340) with a prior-ops resize of 200 in the SAME proposal → INVALID.
+    await expect(
+      f.guard.dispatch('design_update', {
+        intent: 'x',
+        operations: [
+          { kind: 'move', params: { x: 600, y: 340 } },
+          { kind: 'resize', params: { size: 200 } },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+    // A resize that invalidates an EARLIER-VALID move: (500,250)+72 fits,
+    // but size 200 there does not (500+200 > 640).
+    await expect(
+      f.guard.dispatch('design_update', {
+        intent: 'x',
+        operations: [
+          { kind: 'move', params: { x: 500, y: 250 } },
+          { kind: 'resize', params: { size: 200 } },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+    // Sequential chain that the per-op rule MUST reject: move (500,300) fits
+    // alone (500+72, 300+72) but resize 120 after it does not (300+120 > 400).
+    await expect(
+      f.guard.dispatch('design_update', {
+        intent: 'x',
+        operations: [
+          { kind: 'move', params: { x: 500, y: 300 } },
+          { kind: 'resize', params: { size: 120 } },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+    // Positive chain: move (500,250) then resize 120 → 620 ≤ 640 and 370 ≤ 400.
+    const okChain = f.propose('valid derived chain', [
+      { kind: 'move', params: { x: 500, y: 250 } },
+      { kind: 'resize', params: { size: 120 } },
+    ]);
+    expect(f.guard.getChangeSet(okChain)?.status).toBe('proposed');
+    // A plain move inside the default-size bounds stays fine.
+    const okMove = f.propose('ok move', [{ kind: 'move', params: { x: 40, y: 40 } }]);
+    expect(f.guard.getChangeSet(okMove)?.status).toBe('proposed');
+  });
+
+  it('amend is validated against the derived state of PRIOR INCLUDED ops (INVALID_AMENDMENT, never mutates)', async () => {
+    const f = setup();
+    // A valid proposed move, amended out of bounds → INVALID_AMENDMENT.
+    const csId = f.propose('Amend move out of bounds', [
+      { kind: 'move', params: { x: 40, y: 40 } },
+    ]);
+    expect(() => f.guard.amendOperation(csId, 'op-1', { x: 640, y: 400 })).toThrowError(
+      /INVALID_AMENDMENT/,
+    );
+    expect(f.guard.getChangeSet(csId)!.operations[0].params).toEqual({ x: 40, y: 40 });
+
+    // An EARLIER op can make a LATER amendment invalid: amend the resize beyond
+    // the position the prior move commits the logo to.
+    const cs2 = f.propose('Resize beyond earlier move', [
+      { kind: 'move', params: { x: 500, y: 250 } },
+      { kind: 'resize', params: { size: 100 } },
+    ]);
+    expect(f.guard.getChangeSet(cs2)?.status).toBe('proposed'); // 500+100=600 ≤ 640, 250+100=350 ≤ 400
+    expect(() => f.guard.amendOperation(cs2, 'op-2', { size: 200 })).toThrowError(
+      /INVALID_AMENDMENT/,
+    );
+    expect(f.guard.getChangeSet(cs2)!.operations[1].params).toEqual({ size: 100 });
+    // Amending the EARLIER move itself validates only against PRIOR included
+    // ops (none) — the later resize does not constrain AMENDMENT-time.
+    expect(() => f.guard.amendOperation(cs2, 'op-1', { x: 300, y: 100 })).not.toThrow();
+    // (The chain stays safe at COMMIT either way: the guard re-validates the
+    // included chain against its accumulated prior context before applying —
+    // see the commit-time re-validation tests below.)
+  });
+
+  it('commit re-validates the included chain: SKIP-then-commit escape closed (INVALID_OPERATION, stays reviewing, promise pending)', async () => {
+    const f = setup();
+    // [resize(40), move(600,360)] is VALID at dispatch on the derived chain
+    // (600+40 === 640 and 360+40 === 400). Skipping the resize would commit
+    // the move against the LIVE size 72 → 600+72 > 640 → off-canvas.
+    const p = f.guard.dispatch('design_update', {
+      intent: 'Skip escapes derived fit',
+      operations: [
+        { kind: 'resize', params: { size: 40 } },
+        { kind: 'move', params: { x: 600, y: 360 } },
+      ],
+    }) as Promise<AgentOutcome>;
+    const csId = f.ui.lastChangeSetId();
+    expect(f.guard.getChangeSet(csId)?.status).toBe('proposed');
+
+    f.guard.toggleOperation(csId, 'op-1', false); // human skips the resize
+    const err = await f.guard.commitChangeSet(csId).catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'RediniError', code: 'INVALID_OPERATION' });
+    expect(String((err as Error).message)).toContain('op-2'); // failing op + reason
+    // BEFORE any mutation: the store is untouched, the ChangeSet stays
+    // 'reviewing' and the agent promise is NOT settled — the human can
+    // re-include and retry (same semantics as EMPTY_CHANGESET).
+    expect(f.store.design.logo).toEqual({ x: 500, y: 40, size: 72 });
+    expect(f.guard.getChangeSet(csId)?.status).toBe('reviewing');
+    const stillPending = await Promise.race([
+      p.then(() => false),
+      new Promise((r) => setTimeout(() => r(true), 50)),
+    ]);
+    expect(stillPending).toBe(true);
+
+    // Un-skip → the full chain re-validates and commits cleanly.
+    f.guard.toggleOperation(csId, 'op-1', true);
+    const receipt = await f.guard.commitChangeSet(csId);
+    expect(receipt.applied.map((r) => r.id)).toEqual(['op-1', 'op-2']);
+    expect(f.store.design.logo).toEqual({ x: 600, y: 360, size: 40 });
+    expect(await p).toMatchObject({ status: 'committed', changeSetId: csId, appliedCount: 2 });
+  });
+
+  it('commit re-validates the included chain: AMEND-then-commit escape closed (INVALID_OPERATION, stays reviewing, promise pending)', async () => {
+    const f = setup();
+    // [move(500,250), resize(100)] is valid at dispatch (500+100 ≤ 640,
+    // 250+100 ≤ 400). Amending op-1 to (560,320) is ALSO valid at amend time —
+    // it validates without seeing op-2 (no prior included ops). Committing
+    // without re-validation would apply move(560,320) then resize(100):
+    // 560+100 = 660 > 640 → off-canvas.
+    const p = f.guard.dispatch('design_update', {
+      intent: 'Amend escapes derived fit',
+      operations: [
+        { kind: 'move', params: { x: 500, y: 250 } },
+        { kind: 'resize', params: { size: 100 } },
+      ],
+    }) as Promise<AgentOutcome>;
+    const csId = f.ui.lastChangeSetId();
+
+    f.guard.amendOperation(csId, 'op-1', { x: 560, y: 320 }); // valid alone, blind to op-2
+    const err = await f.guard.commitChangeSet(csId).catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'RediniError', code: 'INVALID_OPERATION' });
+    expect(String((err as Error).message)).toContain('op-2'); // failing op + reason
+    // No mutation, no settlement: still 'reviewing', promise still pending.
+    expect(f.store.design.logo).toEqual({ x: 500, y: 40, size: 72 });
+    expect(f.guard.getChangeSet(csId)?.status).toBe('reviewing');
+    const stillPending = await Promise.race([
+      p.then(() => false),
+      new Promise((r) => setTimeout(() => r(true), 50)),
+    ]);
+    expect(stillPending).toBe(true);
+
+    // The human fixes the chain (smaller resize) and retries → commits.
+    f.guard.amendOperation(csId, 'op-2', { size: 60 });
+    const receipt = await f.guard.commitChangeSet(csId);
+    expect(receipt.applied.map((r) => r.id)).toEqual(['op-1', 'op-2']);
+    expect(f.store.design.logo).toEqual({ x: 560, y: 320, size: 60 });
+    // A committed AgentOutcome is clean: NO stateUncertain property.
+    const outcome = (await p) as AgentOutcome;
+    expect(outcome.status).toBe('committed');
+    expect('stateUncertain' in outcome).toBe(false);
+  });
+
+  it('derived-fit exact boundary: x+size === 640 AND y+size === 400 is VALID (dispatch + commit); +1 is INVALID; string x is INVALID_AMENDMENT', async () => {
+    const f = setup();
+    // Exact fit with the default size 72: 568+72 === 640, 328+72 === 400.
+    const p = f.guard.dispatch('design_update', {
+      intent: 'Exact fit',
+      operations: [{ kind: 'move', params: { x: 568, y: 328 } }],
+    }) as Promise<AgentOutcome>;
+    const csId = f.ui.lastChangeSetId();
+    expect(f.guard.getChangeSet(csId)?.status).toBe('proposed'); // VALID at dispatch
+
+    const receipt = await f.guard.commitChangeSet(csId);
+    expect(receipt.applied.map((r) => r.id)).toEqual(['op-1']);
+    expect(f.store.design.logo).toEqual({ x: 568, y: 328, size: 72 });
+    // Committed outcome: NO stateUncertain on success.
+    expect('stateUncertain' in (await p)).toBe(false);
+
+    // +1 beyond the exact fit → INVALID_OPERATION at dispatch (either axis).
+    await expect(
+      f.guard.dispatch('design_update', {
+        intent: 'x',
+        operations: [{ kind: 'move', params: { x: 569, y: 328 } }],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+    await expect(
+      f.guard.dispatch('design_update', {
+        intent: 'x',
+        operations: [{ kind: 'move', params: { x: 568, y: 329 } }],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_OPERATION' });
+
+    // Amend parity: a non-number x ("40") is rejected at amend, never coerced.
+    const csAmend = f.propose('Amend string x', [{ kind: 'move', params: { x: 40, y: 40 } }]);
+    expect(() => f.guard.amendOperation(csAmend, 'op-1', { x: '40', y: 40 })).toThrowError(
+      /INVALID_AMENDMENT/,
+    );
+    expect(f.guard.getChangeSet(csAmend)!.operations[0].params).toEqual({ x: 40, y: 40 });
+  });
+
+  it('get_current_design returns a deep clone: mutating it cannot corrupt the store', async () => {
+    const f = setup();
+    const versionBefore = f.store.version;
+    const res = (await f.guard.dispatch('get_current_design', {})) as { design: FlyerDesign };
+    // Deep mutate the returned object (nested logo included).
+    res.design.title = 'CORRUPTED';
+    res.design.logo.x = 9999;
+    res.design.logo.size = 999;
+    expect(f.store.design.title).toBe('Spring Market on Main Street');
+    expect(f.store.design.logo).toEqual({ x: 500, y: 40, size: 72 });
+    expect(f.store.version).toBe(versionBefore);
   });
 });

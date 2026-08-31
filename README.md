@@ -72,7 +72,7 @@ Approval gates exist (allow/deny modals, platform confirmations), diff/undo edit
 - **Diff/undo editors** show a before/after of one change. Redini stages **multiple proposed operations from one agent intent** inside **ONE live WebMCP invocation** and keeps the agent's promise pending until the human decides; the receipt records the distance between what the agent intended and what the human co-authored.
 - **Undo**: deterministic **inverse operations** per applied operation (limited vocabulary, exact undo), not generic snapshots.
 
-**Atomicity** — Atelier applies its deterministic local operation subset atomically using compensating inverse operations. No universal claims beyond that: Redini runs in the page, it is human control, recoverability and auditable mutations — not a security boundary.
+**Atomicity** — Atelier applies its deterministic local operation subset atomically using compensating inverse operations. If an apply is attempted and does not complete, the resulting state may be partially applied — Redini reports the result as state-uncertain instead of claiming nothing happened. No universal claims beyond that: Redini runs in the page, it is human control, recoverability and auditable mutations — not a security boundary. The scoped atomicity claim above stays true for Atelier: its store emit is failure-isolated, so an apply can never break after the mutation.
 
 ## How to run
 
@@ -98,10 +98,13 @@ WebMCP needs a supporting browser: Chrome 149+ launched with
 npm run build        # tsc && vite build → dist/
 ```
 
-Publish the **`dist/` folder** — Netlify Drop (drag & drop at app.netlify.com/drop) works as-is, because Vite copies `public/_headers` verbatim into `dist/_headers`. Those headers make the WebMCP browser setup explicit:
+Publish the **`dist/` folder** — Netlify Drop (drag & drop at app.netlify.com/drop) works as-is, because Vite copies `public/_headers` verbatim into `dist/_headers`. Those headers make the WebMCP browser setup explicit and set the baseline security posture:
 
 - `Origin-Agent-Cluster: ?1` — WebMCP requires the document to live in an **origin-keyed agent cluster**.
 - `Permissions-Policy: tools=(self)` — the experimental `tools()` permission is exposed to this origin only.
+- `X-Content-Type-Options: nosniff` — MIME sniffing is disabled.
+- `Referrer-Policy: strict-origin-when-cross-origin` — referrer leakage stays minimal.
+- `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'self' https://chatgpt.com https://chat.openai.com` — same-origin resources only (the app links local CSS/JS, uses system fonts and CSSOM styling, and makes no external fetches), plus the anti-clickjacking policy: `frame-ancestors` allowlists `'self'` and the ChatGPT WebMCP hosts, so the human approval surface is protected against framing except for allowlisted WebMCP hosts; if a future host needs embedding, extend the allowlist.
 
 Repository-connected deploys are covered by [`netlify.toml`](./netlify.toml) (build `npm run build`, publish `dist`). Post-deploy verification in the browser console:
 

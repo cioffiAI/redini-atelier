@@ -58,8 +58,21 @@ export class AtelierStore {
     return () => this.listeners.delete(fn);
   }
 
+  /**
+   * Failure-isolated emit: each listener is guarded so a throwing UI listener
+   * (e.g. a DOM handler) can never break an in-progress mutation. This is what
+   * makes Atelier's apply() failure-atomic in practice: apply mutates (bumps +
+   * emits) and then only builds the pure inverse — nothing after the mutation
+   * can throw. Listener errors surface as console warnings, never rethrown.
+   */
   private emit(type: StoreEventType): void {
-    this.listeners.forEach((fn) => fn(type));
+    for (const fn of this.listeners) {
+      try {
+        fn(type);
+      } catch (e) {
+        console.warn('Atelier store listener error:', e);
+      }
+    }
   }
 
   private bump(): void {

@@ -245,7 +245,12 @@ const ui: UIAdapter & { bind?: (g: ReturnType<typeof createGuard>) => void } = {
       if (cs.status === 'declined') setCanvasStatus('Declined — nothing was applied.');
       else if (cs.status === 'cancelled') setCanvasStatus('Cancelled — nothing was applied.');
       else if (cs.status === 'stale') setCanvasStatus('Proposal expired — nothing was applied.');
-      else if (cs.status === 'failed') setCanvasStatus("A change couldn't be applied — nothing was committed.");
+      else if (cs.status === 'failed')
+        // EXECUTION_FAILED is state-uncertain by construction — an apply was
+        // attempted and did not complete — the poster may be partially updated.
+        setCanvasStatus(
+          "A change couldn't be fully applied — the poster may be in a partially updated state.",
+        );
       else if (cs.status === 'undo_failed') setCanvasStatus('Undo failed partway — you can try again.');
     }
   },

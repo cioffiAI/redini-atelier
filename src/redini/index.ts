@@ -1,6 +1,7 @@
 export { RediniGuard, createGuard } from './guard';
 export type { GuardOptions } from './guard';
 export { RediniError } from './errors';
+export { CHANGESET_LIMITS } from './types';
 export type { RediniErrorCode } from './errors';
 export { deepEqual } from './utils';
 export { InMemoryUI } from './ui/in-memory';

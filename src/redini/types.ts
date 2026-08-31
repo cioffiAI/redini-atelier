@@ -24,6 +24,20 @@ export type ChangeSetStatus =
 export type OperationStatus = 'intended' | 'amended' | 'skipped' | 'applied' | 'failed';
 
 /**
+ * Generic ChangeSet size caps (DoS). The guard enforces them at dispatch — it
+ * never trusts the host's schema enforcement — and the app's inputSchema
+ * mirrors them verbatim. Apps can be stricter via their own per-op validator;
+ * these are Redini's own hard bounds. Value-length caps (e.g. 120 chars) stay
+ * app-side: they are domain-specific, not generic ChangeSet limits.
+ */
+export const CHANGESET_LIMITS = {
+  /** Maximum number of operations per ChangeSet. */
+  maxOps: 32,
+  /** Maximum length of the intent string, in characters. */
+  maxIntentLength: 200,
+} as const;
+
+/**
  * Statuses that END the negotiation: no live buttons, no preview, no further
  * human edits. Single source of truth shared by the guard (decided gates +
  * preview suppression) and the UI (terminal card rendering).
@@ -91,6 +105,15 @@ export interface ChangeSet {
    * with STALE_TRANSACTION; the flag itself is a preview, not a lock.
    */
   isStale: boolean;
+  /**
+   * Honest atomicity: an apply was attempted and did not complete — the
+   * resulting state may be partially applied. Redini reports stateUncertain
+   * instead of claiming nothing happened. Set on every failed commit
+   * (EXECUTION_FAILED and ROLLBACK_FAILED alike); undefined on clean outcomes
+   * (committed/declined/cancelled/stale) and pre-staging failures (no apply
+   * was ever attempted).
+   */
+  stateUncertain?: boolean;
 }
 
 export interface ReceiptRow {
@@ -199,6 +222,15 @@ export interface ChangeSetResult {
   amendedCount: number;
   skippedCount: number;
   undoAvailable: boolean;
+  /**
+   * Honest atomicity: true for every execute_failed outcome — an apply was
+   * attempted and did not complete, so the resulting state may be partially
+   * applied; Redini reports stateUncertain instead of claiming nothing
+   * happened. Undefined/absent on clean outcomes (committed, declined,
+   * cancelled, stale_transaction) and pre-staging validation failures (no
+   * apply was ever attempted).
+   */
+  stateUncertain?: boolean;
   error?: { code: string; message: string };
 }
 
@@ -246,8 +278,17 @@ export interface ChangeSetToolDefinition {
   kinds: string[];
   /** Optional schema override; by default Redini generates one from `kinds`. */
   inputSchema?: object;
-  /** Optional per-operation validation. Return an error string to reject. */
-  validate?: (op: { kind: string; params: Record<string, unknown> }) => string | null;
+  /**
+   * Optional per-operation validation. Return an error string to reject.
+   * `priorOps` (when provided by the guard) carries the operations that
+   * precede this one — current params, in proposal order — so a validator can
+   * evaluate against the SEQUENTIAL derived state (e.g. logo bounds). Validators
+   * that ignore the second argument stay fully backward compatible.
+   */
+  validate?: (
+    op: { kind: string; params: Record<string, unknown> },
+    priorOps?: Array<{ kind: string; params: Record<string, unknown> }>,
+  ) => string | null;
   runtime: OperationRuntime;
   /** Human one-liner for an operation, e.g. `title → "AI SUMMIT"`. */
   describeOperation?: (op: { kind: string; params: Record<string, unknown> }) => string;

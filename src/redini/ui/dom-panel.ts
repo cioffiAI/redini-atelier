@@ -80,7 +80,12 @@ const ERROR_MESSAGES: Record<string, string> = {
   EMPTY_CHANGESET: 'Every change was skipped — nothing to commit.',
   STALE_TRANSACTION:
     'The poster changed while this proposal was being reviewed. Ask the agent for a fresh proposal.',
-  EXECUTION_FAILED: "A change couldn't be applied — nothing was committed.",
+  // EXECUTION_FAILED is state-uncertain BY CONSTRUCTION: an apply was attempted
+  // and did not complete — it may have mutated state without returning an
+  // inverse — so the poster may be partially updated. The UI never claims
+  // "nothing happened" without certainty.
+  EXECUTION_FAILED:
+    "A change couldn't be fully applied — the poster may be in a partially updated state.",
   ROLLBACK_FAILED: 'Some changes could not be fully restored. See developer details.',
   UNDO_FAILED: 'Undo failed partway — you can try again.',
   REDO_FAILED: 'Redo failed partway — you can try again.',
@@ -212,7 +217,12 @@ export function createDomPanel(
       case 'cancelled':
         return 'Cancelled';
       case 'failed':
-        return "A change couldn't be applied — nothing was committed.";
+        // EXECUTION_FAILED is ALWAYS state-uncertain by construction (an apply
+        // was attempted and did not complete — the poster may be partially
+        // updated). ROLLBACK_FAILED keeps its own copy via the audit detail.
+        return entry.detail?.rollbackFailed === true
+          ? ERROR_MESSAGES.ROLLBACK_FAILED
+          : ERROR_MESSAGES.EXECUTION_FAILED;
       case 'undo_failed':
         return 'Undo failed partway — you can try again.';
       case 'redo_failed':
@@ -224,11 +234,11 @@ export function createDomPanel(
 
   // ---------- errors ----------
 
-  function renderErrorInto(err: HTMLElement, e: unknown): void {
+  function renderErrorInto(err: HTMLElement, e: unknown, humanMsg?: string): void {
     err.textContent = '';
     const msg = document.createElement('span');
     msg.className = 'err-msg';
-    msg.textContent = humanizeError(e);
+    msg.textContent = humanMsg ?? humanizeError(e);
     err.appendChild(msg);
     const code = errorCodeOf(e);
     if (code) {
@@ -242,14 +252,14 @@ export function createDomPanel(
     }
   }
 
-  function showError(card: HTMLElement, e: unknown): void {
+  function showError(card: HTMLElement, e: unknown, humanMsg?: string): void {
     let err = card.querySelector<HTMLElement>('.tx-error');
     if (!err) {
       err = document.createElement('div');
       err.className = 'tx-error';
       card.appendChild(err);
     }
-    renderErrorInto(err, e);
+    renderErrorInto(err, e, humanMsg);
   }
 
   function updateHistoryButtons(): void {
@@ -713,7 +723,10 @@ export function createDomPanel(
       commit.disabled = includedCount === 0;
       commit.addEventListener('click', () => {
         if (!guard) return;
-        // FIX D: errors (e.g. EMPTY_CHANGESET) render inline; never to console.
+        // FIX D: errors (e.g. EMPTY_CHANGESET, INVALID_OPERATION from the
+        // commit-time chain re-validation) render inline; never to console.
+        // humanizeError maps EXECUTION_FAILED to the partially-updated copy and
+        // ROLLBACK_FAILED to its own — no per-tx branch needed.
         guard.commitChangeSet(cs.id).catch((e: unknown) => showError(card, e));
       });
       const decline = document.createElement('button');
@@ -736,7 +749,12 @@ export function createDomPanel(
       if (cs.status === 'stale') note.textContent = 'This proposal expired — nothing was applied.';
       else if (cs.status === 'declined') note.textContent = 'Declined — nothing was applied.';
       else if (cs.status === 'cancelled') note.textContent = 'Cancelled — nothing was applied.';
-      else note.textContent = "A change couldn't be applied — nothing was committed.";
+      else if (cs.status === 'failed')
+        // EXECUTION_FAILED is state-uncertain by construction and
+        // ROLLBACK_FAILED is worse — an apply was attempted and did not
+        // complete, the poster may be partially updated, always.
+        note.textContent =
+          "A change couldn't be fully applied — the poster may be in a partially updated state.";
       card.appendChild(note);
     }
   }

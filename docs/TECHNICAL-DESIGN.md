@@ -1,10 +1,11 @@
 # TECHNICAL DESIGN — Redini + Atelier (v3)
 Stato: v3 — 30/08/2026+ — la unità centrale è il **ChangeSet multi-operazione**
 (una intent → un tool call → una transazione editabile). Documenta TUTTE le
-semantiche v3: amendment validato, receipt a righe strutturate, history
-editor-style (undoStack/redoStack), EXECUTION_FAILED vs ROLLBACK_FAILED,
-execute-che-non-rifiuta,
-schema strict per-kind.
+semantiche v3: amendment validato (con contratto contestuale `validate(op, priorOps?)`),
+receipt a righe strutturate, history editor-style (undoStack/redoStack),
+EXECUTION_FAILED vs ROLLBACK_FAILED, stateUncertain (atomicità onesta), emit
+failure-isolated di Atelier, execute-che-non-rifiuta, cap DoS (size caps),
+schema strict per-kind, header di sicurezza.
 
 ---
 
@@ -76,6 +77,21 @@ UNDO/REDO deterministici (history editor-style: undoStack/redoStack, inverse ope
 2. Esegue il `validate` del tool registrato su `{kind, params}`: se restituisce una stringa di errore → `RediniError INVALID_AMENDMENT` con quel messaggio e **l'operazione NON viene mutata**.
 3. A successo: `op.params = structuredClone(params)` e `op.label` **ricalcolato** via `describeOperation` con i NUOVI parametri (pannello e receipt mostrano sempre la descrizione corrente).
 4. `originalParams` (e `originalLabel`, fissato al dispatch) restano immutabili per sempre — sono la prova dell'intenzione dell'agente.
+
+### Contratto di validazione CONTESTUALE: `validate(op, priorOps?)`
+
+Il validatore riceve, oltre all'operazione candidata, il **contesto sequenziale**: `validate?: (op, priorOps?) => string | null`, dove `priorOps` è l'array delle operazioni che la precedono — params CORRENTI (eventuali amendment), in ordine di proposta. Il guard lo fornisce in entrambi i punti di ingresso:
+
+- **dispatch**: le raw operations già validate fin lì (stessa sequenza che il commit applicherà);
+- **amendOperation**: le ops PRIOR **incluse** (slice prima dell'op modificata, filtrata per `included`), così un amendment umano viene validato sullo STESSO stato derivato del commit.
+
+Il contratto è generico e application-agnostic; i validatori esistenti che ignorano il secondo argomento restano pienamente compatibili.
+
+Il guard esegue `validate` in TRE punti di ingresso: **dispatch**, **amendOperation** e **commit** (commit-time chain re-validation). A commit, OGNI op inclusa viene ri-validata sullo stesso contesto accumulato prior-included che il commit applicherà: skip e amend possono cambiare lo stato derivato DOPO la validazione per-op (skippare un resize precedente fa committare un move successivo sulla size LIVE; un parametro amendato può spingere l'op successiva fuori bounds). Se una ri-validazione fallisce → `INVALID_OPERATION` PRIMA di qualsiasi mutazione, senza sbloccare la promessa dell'agente e senza cambiare lo stato del ChangeSet (resta `reviewing` — l'umano può amendare/skippare e riprovare, stessa semantica di EMPTY_CHANGESET). La validazione a dispatch resta feedback anticipato; la catena inclusa viene ri-validata a commit perché è lì che decide.
+
+### Regola derived-fit del logo (Atelier)
+
+Il bug corretto: `move` accettava `x<=640/y<=400` a prescindere dalla SIZE del logo, quindi `move {x:640,y:400}` portava il logo interamente fuori canvas — e un `resize` successivo nello stesso ChangeSet poteva invalidare un move prima valido. La regola corretta `x + size <= CANVAS_W && y + size <= CANVAS_H` è valutata sullo **stato derivato sequenziale**: `validateOp(op, priorOps)` ripercorre il logo `{x, y, size}` partendo da `store.design.logo` (move imposta x/y, resize imposta size) e valida il candidato: move → x/y candidati con size derivata; resize → size candidata con x/y derivati. Fuori bounds → `"logo would not fit inside the canvas at (x, y) with size N"` (`INVALID_OPERATION` al dispatch, `INVALID_AMENDMENT` all'amend). Le descrizioni dello schema move/resize documentano la regola.
 
 La UI usa form tipizzati per-kind (niente editing JSON grezzo):
 `setText` → input testo; `setFill` → color picker + hex; `setFont` → select con i font reali dell'app; `move` → x/y numerici con i bound reali della canvas (640×400); `resize` → size numerico (16–200). Un errore `INVALID_AMENDMENT` appare inline in `.tx-error` e il form resta aperto.
@@ -150,6 +166,32 @@ Se un `apply` fallisce:
 3. Se UN inverso fallisce: ferma, stato `failed`, audit `failed {error, rolledBack: <successi finora>, rollbackFailed: true, failedCompensation: <id>}`, promessa agente → `execute_failed` con `error.code: ROLLBACK_FAILED`, lanciato `RediniError('ROLLBACK_FAILED', ..., {appliedOperations, compensatedOperations, failedCompensation, cause})`. **Nessun falso conteggio rolledBack.**
 4. La promessa dell'agente viene sbloccata ESATTAMENTE UNA volta in tutti i percorsi.
 5. MELD: Redini **non assume apply failure-atomic** — ogni `runtime.apply` tentato in un commit/undo/redo fallito invalida conservativamente le proposte pending (bump del `mutationCounter`), a prescindere dal fatto che un inverso sia stato restituito (un apply può mutare lo stato e lanciare SENZA restituire l'inverso).
+
+### stateUncertain: atomicità ONESTA
+
+**EXECUTION_FAILED è SEMPRE state-uncertain per costruzione**: quando un commit
+fallisce, `ChangeSet.stateUncertain` e `AgentOutcome.stateUncertain` vengono
+impostati a `true` in OGNI esito (EXECUTION_FAILED e ROLLBACK_FAILED).
+Razionale: un apply è stato **tentato e NON ha completato** — Redini non può
+sapere se il runtime ha mutato lo stato prima di lanciare (nessun inverso
+restituito) — quindi lo stato risultante **potrebbe essere parzialmente
+applicato**; Redini riporta `stateUncertain` invece di dichiarare "non è
+successo niente", anche quando il prefisso completato viene compensato
+pulitamente. (La vecchia condizione `applyAttempts > appliedIds.length` era
+una tautologia: un apply che lancia è SEMPRE stato tentato senza completare.)
+
+Il flag viaggia nel public ChangeSet (solo quando true), nel detail dell'audit
+`failed` e in ENTRAMBI gli esiti di settle (`EXECUTION_FAILED` e
+`ROLLBACK_FAILED`). La UI umanizza in modo coerente — activity line, nota
+terminale della card, errore inline del commit e canvas status: un
+EXECUTION_FAILED è SEMPRE "A change couldn't be fully applied — the poster may
+be in a partially updated state." (la copy ROLLBACK_FAILED "Some changes could
+not be fully restored." resta invariata). Mai una falsa asserzione "niente è
+stato committato" quando un apply è stato tentato.
+
+### emit failure-isolated (Atelier)
+
+`AtelierStore.emit()` avvolge OGNI listener in try/catch (console.warn, mai rethrow). Razionale: `apply()` legge prev → muta via mutator del store (che emette) → costruisce l'inverso; un listener UI che lancia DOPO la mutazione romperebbe la failure-atomicity. Con l'isolamento gli apply di Atelier sono failure-atomic in pratica — l'unico lavoro post-mutazione è costruire l'inverso, puro. L'assunzione core di Redini NON cambia: per i runtime generici il flag `stateUncertain` resta la rete di sicurezza.
 
 **Caso speciale EMPTY_CHANGESET**: committare un ChangeSet tutto-skippato è un errore
 della UI umana, NON dell'agente: la promessa NON viene sbloccata, il ChangeSet resta
@@ -235,11 +277,18 @@ try { return await dispatch(...) } catch (e) { return { status:'execute_failed',
 }
 ```
 
-- `setText` → params `{field: enum[title,subtitle,dateLine], value: string}`
+- `setText` → params `{field: enum[title,subtitle,dateLine], value: string maxLength 120}`
 - `setFill` → params `{target: enum[background,text], value: string pattern ^#[0-9a-fA-F]{6}$}`
-- `setFont` → params `{value: string enum dei 3 font reali}`
-- `move` → params `{x: number 0..640, y: number 0..400}` (bound reali della canvas)
-- `resize` → params `{size: number 16..200}`
+- `setFont` → params `{value: string enum dei 3 font reali, maxLength 120}`
+- `move` → params `{x: number 0..640, y: number 0..400}` (bound reali della canvas) — regola derived-fit in §3
+- `resize` → params `{size: number 16..200}` — regola derived-fit in §3
+
+### Cap DoS (size caps)
+
+Il ChangeSet è limitato a **32 operations** e **200 caratteri di intent**; i valori di `setText`/`setFont` a **120 caratteri**. Applicazione DOPPIA, mai solo schema:
+
+- **Schema** (`inputSchema` di `design_update`): `maxItems: 32`, `maxLength: 200` su intent, `maxLength: 120` sui value — con descrizioni che notano la regola derived-fit per move/resize;
+- **Runtime** (mai fidarsi dell'enforcement dello schema host): il guard rifiuta `operations > 32` → `"too many operations (max 32)"` e `intent > 200` → `"intent too long (max 200 characters)"` (entrambi `INVALID_OPERATION` al dispatch); `validateOp` rifiuta il 33° op contando `priorOps` e i value > 120 → `"value too long (max 120 characters)"`.
 
 `def.validate` (validateOp) è CONSISTENTE con lo schema — e la parità è ora
 completa a livello di guard dispatch: kind sconosciuti, enum errati, campi
@@ -277,7 +326,24 @@ rifiutate (additionalProperties:false), e `intent` mancante è `INVALID_OPERATIO
 Nessun tool dinamico: niente varianti, niente `select_variant_N`. La superficie
 è verificata a test (fix 5 tool dopo qualsiasi flusso).
 
-## 12. Caso avversario (demo beat, non paper di security)
+## 14. Header di sicurezza (anti-clickjacking + posture baseline)
+
+`public/_headers` (copiato verbatim in `dist/_headers` da Vite):
+
+```
+/*
+  Origin-Agent-Cluster: ?1
+  Permissions-Policy: tools=(self)
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'self' https://chatgpt.com https://chat.openai.com
+```
+
+- La CSP è UNA riga nel file. `default-src 'self'` + `script-src/style-src/connect-src 'self'` e `img-src 'self' data:` coprono l'app senza origini esterne: build con CSS/JS locali, font di sistema, manipolazione stile via CSSOM (non bloccata da `style-src`), favicon `data:,`, nessun fetch esterno.
+- **frame-ancestors** usa un ALLOWLIST (`'self'` + host ChatGPT WebMCP) e NON `'none'` di proposito: il browser host WebMCP può incorporare l'app; la superficie di approvazione umana è protetta dal framing eccetto gli host allowlistati. Se un futuro host deve incorporarla, si estende la lista. (Il lead farà un re-smoke post-deploy e toglierà la riga se incompatibile.)
+- L'e2e gira su localhost SENZA gli header Netlify: la verifica delle intestazioni reali è post-deploy; a livello di CI si asserisce il contenuto di `dist/_headers` dopo la build (`grep -q "Origin-Agent-Cluster" dist/_headers` in `.github/workflows/ci.yml`) — la copia verbatim di `public/_headers` non può più andare alla deriva.
+
+## 15. Caso avversario (demo beat, non paper di security)
 
 Il tool read-only `get_vendor_content` restituisce testo promozionale del
 template "evening-gala" con un'istruzione iniettata. Punto dimostrato: la
@@ -286,7 +352,7 @@ diventa mai automaticamente stato dell'app. L'umano la rifiuta con un click.
 Nessuna pretesa di security boundary: il layer è client-side, è human control
 e recoverability.
 
-## 13. Struttura del repository
+## 16. Struttura del repository
 
 ```
 webmcp-hackaton/

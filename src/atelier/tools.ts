@@ -1,4 +1,5 @@
 import type { RediniGuard } from '../redini/guard';
+import { CHANGESET_LIMITS } from '../redini';
 import type { Operation, OperationRuntime } from '../redini/types';
 import { templates } from './templates';
 import { AtelierStore, CANVAS_H, CANVAS_W, FONT_OPTIONS } from './store';
@@ -21,6 +22,13 @@ const ALLOWED_PARAM_KEYS: Record<string, string[]> = {
   move: ['x', 'y'],
   resize: ['size'],
 };
+
+/** ChangeSet size caps — the ops/intent caps are Redini's SHARED constants (the
+ * guard enforces them at dispatch; the schema mirrors them); the domain value
+ * length stays app-side. */
+const MAX_OPS = CHANGESET_LIMITS.maxOps;
+const MAX_INTENT_LENGTH = CHANGESET_LIMITS.maxIntentLength;
+const MAX_VALUE_LENGTH = 120;
 
 function buildOpLabel(op: { kind: string; params: Record<string, unknown> }): string {
   const p = op.params;
@@ -49,46 +57,98 @@ function rejectUnknownParams(kind: string, params: Record<string, unknown>): str
   return null;
 }
 
-function validateOp(op: { kind: string; params: Record<string, unknown> }): string | null {
-  const p = op.params;
-  const extra = rejectUnknownParams(op.kind, p);
-  if (extra) return extra;
-  switch (op.kind) {
-    case 'setText':
-      if (!TEXT_FIELDS.includes(String(p.field))) return `unknown text field "${String(p.field)}"`;
-      if (typeof p.value !== 'string') return 'value must be a string';
-      return null;
-    case 'setFill':
-      if (!FILL_TARGETS.includes(String(p.target))) return `unknown fill target "${String(p.target)}"`;
-      if (typeof p.value !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(p.value)) {
-        return 'fill must be a #rrggbb color';
-      }
-      return null;
-    case 'setFont':
-      if (!FONT_OPTIONS.includes(String(p.value))) return `unknown font "${String(p.value)}"`;
-      return null;
-    case 'move': {
-      // Validator parity: REAL numbers only — a string "40" must be rejected,
-      // not coerced (the schema says type: number).
-      if (
-        typeof p.x !== 'number' ||
-        typeof p.y !== 'number' ||
-        !Number.isFinite(p.x) ||
-        !Number.isFinite(p.y)
-      ) {
-        return 'x and y must be numbers';
-      }
-      if (p.x < 0 || p.x > CANVAS_W || p.y < 0 || p.y > CANVAS_H) return `logo must stay within ${CANVAS_W}×${CANVAS_H}`;
-      return null;
+/**
+ * The logo {x, y, size} as it will be when the candidate applies: start from
+ * the CURRENT store design and replay each prior operation (move sets x/y,
+ * resize sets size). Non-move/resize ops don't touch the logo.
+ */
+function derivedLogo(
+  store: AtelierStore,
+  priorOps: Array<{ kind: string; params: Record<string, unknown> }>,
+): { x: number; y: number; size: number } {
+  let logo = { ...store.design.logo };
+  for (const prior of priorOps) {
+    const p = prior.params;
+    if (prior.kind === 'move' && typeof p.x === 'number' && typeof p.y === 'number') {
+      logo = { ...logo, x: p.x, y: p.y };
+    } else if (prior.kind === 'resize' && typeof p.size === 'number') {
+      logo = { ...logo, size: p.size };
     }
-    case 'resize': {
-      if (typeof p.size !== 'number' || !Number.isFinite(p.size)) return 'size must be a number';
-      if (p.size < 16 || p.size > 200) return 'size must be between 16 and 200';
-      return null;
-    }
-    default:
-      return `unknown operation kind "${op.kind}"`;
   }
+  return logo;
+}
+
+/**
+ * Per-store validator factory: the logo-fit rule starts from THIS store's
+ * live design, so validation always runs against the state the commit will
+ * actually apply on.
+ */
+function createValidateOp(store: AtelierStore) {
+  return function validateOp(
+    op: { kind: string; params: Record<string, unknown> },
+    priorOps: Array<{ kind: string; params: Record<string, unknown> }> = [],
+  ): string | null {
+    // DoS cap: priorOps carries every operation validated before this one, so a
+    // 33rd operation arrives with priorOps.length === MAX_OPS. Never trust the
+    // host's schema enforcement — validate every op here.
+    if (priorOps.length >= MAX_OPS) return 'too many operations (max 32)';
+    const p = op.params;
+    const extra = rejectUnknownParams(op.kind, p);
+    if (extra) return extra;
+    switch (op.kind) {
+      case 'setText':
+        if (!TEXT_FIELDS.includes(String(p.field))) return `unknown text field "${String(p.field)}"`;
+        if (typeof p.value !== 'string') return 'value must be a string';
+        if (p.value.length > MAX_VALUE_LENGTH) return 'value too long (max 120 characters)';
+        return null;
+      case 'setFill':
+        if (!FILL_TARGETS.includes(String(p.target))) return `unknown fill target "${String(p.target)}"`;
+        if (typeof p.value !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(p.value)) {
+          return 'fill must be a #rrggbb color';
+        }
+        return null;
+      case 'setFont':
+        if (!FONT_OPTIONS.includes(String(p.value))) return `unknown font "${String(p.value)}"`;
+        if (typeof p.value === 'string' && p.value.length > MAX_VALUE_LENGTH) {
+          return 'value too long (max 120 characters)';
+        }
+        return null;
+      case 'move': {
+        // Validator parity: REAL numbers only — a string "40" must be rejected,
+        // not coerced (the schema says type: number).
+        if (
+          typeof p.x !== 'number' ||
+          typeof p.y !== 'number' ||
+          !Number.isFinite(p.x) ||
+          !Number.isFinite(p.y)
+        ) {
+          return 'x and y must be numbers';
+        }
+        if (p.x < 0 || p.y < 0) return 'x and y must be non-negative';
+        // Derived-fit rule: the WHOLE logo must stay inside the canvas. Evaluated
+        // on the sequential derived state — a move keeps the size produced by
+        // prior ops; a later resize must also fit the moved position.
+        const derived = { ...derivedLogo(store, priorOps), x: p.x, y: p.y };
+        if (derived.x + derived.size > CANVAS_W || derived.y + derived.size > CANVAS_H) {
+          return `logo would not fit inside the canvas at (${derived.x}, ${derived.y}) with size ${derived.size}`;
+        }
+        return null;
+      }
+      case 'resize': {
+        if (typeof p.size !== 'number' || !Number.isFinite(p.size)) return 'size must be a number';
+        if (p.size < 16 || p.size > 200) return 'size must be between 16 and 200';
+        // Derived-fit rule: the resized logo must fit at the position produced
+        // by prior ops (an earlier move decides x/y).
+        const derived = { ...derivedLogo(store, priorOps), size: p.size };
+        if (derived.x + derived.size > CANVAS_W || derived.y + derived.size > CANVAS_H) {
+          return `logo would not fit inside the canvas at (${derived.x}, ${derived.y}) with size ${derived.size}`;
+        }
+        return null;
+      }
+      default:
+        return `unknown operation kind "${op.kind}"`;
+    }
+  };
 }
 
 /** Strict per-kind params schema — mirrors validateOp exactly. */
@@ -101,7 +161,7 @@ function paramsSchema(kind: string): object {
         required: ['field', 'value'],
         properties: {
           field: { type: 'string', enum: TEXT_FIELDS },
-          value: { type: 'string' },
+          value: { type: 'string', maxLength: MAX_VALUE_LENGTH, description: 'Max 120 characters.' },
         },
       };
     case 'setFill':
@@ -120,7 +180,7 @@ function paramsSchema(kind: string): object {
         additionalProperties: false,
         required: ['value'],
         properties: {
-          value: { type: 'string', enum: FONT_OPTIONS },
+          value: { type: 'string', enum: FONT_OPTIONS, maxLength: MAX_VALUE_LENGTH },
         },
       };
     case 'move':
@@ -129,8 +189,20 @@ function paramsSchema(kind: string): object {
         additionalProperties: false,
         required: ['x', 'y'],
         properties: {
-          x: { type: 'number', minimum: 0, maximum: CANVAS_W },
-          y: { type: 'number', minimum: 0, maximum: CANVAS_H },
+          x: {
+            type: 'number',
+            minimum: 0,
+            maximum: CANVAS_W,
+            description:
+              'Derived-fit rule: the whole logo must stay inside the canvas — x + logo size ≤ 640, evaluated on the sequential derived state (prior moves/sizes apply first).',
+          },
+          y: {
+            type: 'number',
+            minimum: 0,
+            maximum: CANVAS_H,
+            description:
+              'Derived-fit rule: the whole logo must stay inside the canvas — y + logo size ≤ 400, evaluated on the sequential derived state (prior moves/sizes apply first).',
+          },
         },
       };
     case 'resize':
@@ -139,7 +211,13 @@ function paramsSchema(kind: string): object {
         additionalProperties: false,
         required: ['size'],
         properties: {
-          size: { type: 'number', minimum: 16, maximum: 200 },
+          size: {
+            type: 'number',
+            minimum: 16,
+            maximum: 200,
+            description:
+              'Derived-fit rule: the resized logo must fit at the position produced by prior operations — x + size ≤ 640 and y + size ≤ 400 on the sequential derived state.',
+          },
         },
       };
     default:
@@ -169,12 +247,16 @@ export const DESIGN_UPDATE_INPUT_SCHEMA: object = {
   additionalProperties: false,
   required: ['intent', 'operations'],
   properties: {
-    intent: { type: 'string', description: 'One sentence: what this ChangeSet is trying to achieve for the user.' },
+    intent: {
+      type: 'string',
+      maxLength: MAX_INTENT_LENGTH,
+      description: `One sentence: what this ChangeSet is trying to achieve for the user. Max ${MAX_INTENT_LENGTH} characters.`,
+    },
     operations: {
       type: 'array',
       minItems: 1,
-      description:
-        'The individual operations to propose. The human can preview the result, amend parameters, skip operations and atomically commit the subset.',
+      maxItems: MAX_OPS,
+      description: `The individual operations to propose (max ${MAX_OPS}). The human can preview the result, amend parameters, skip operations and atomically commit the subset.`,
       items: {
         oneOf: OP_KINDS.map((kind) => opSchema(kind)),
       },
@@ -251,8 +333,10 @@ export function registerAtelierTools(guard: RediniGuard, store: AtelierStore): v
     description: 'Returns the current flyer design (texts, colors, font, logo position/size). Read-only.',
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
+    // Deep clone: an in-page caller mutating the returned object must never be
+    // able to change the real design (or bump its version).
     execute: () => ({
-      design: store.design,
+      design: structuredClone(store.design),
     }),
   });
 
@@ -311,7 +395,7 @@ export function registerAtelierTools(guard: RediniGuard, store: AtelierStore): v
     inputSchema: DESIGN_UPDATE_INPUT_SCHEMA,
     runtime: createAtelierRuntime(store),
     describeOperation: buildOpLabel,
-    validate: validateOp,
+    validate: createValidateOp(store),
     getStateVersion: () => store.version,
   });
 }
