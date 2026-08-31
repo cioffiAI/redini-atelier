@@ -70,7 +70,7 @@ Redini **runs in the page**: a malicious or compromised app can bypass a client-
 
 ## 5. What the project delivers
 
-1. **`redini/`**: open-source library (~600 lines, zero dependencies, application-agnostic):
+1. **`redini/`**: open-source library (~2,100 lines, zero dependencies; the guard core is application-agnostic, the bundled DOM panel is not yet):
    - `registerChangeSetTool()` (with `registerSafeTool()` for read-only)
    - multi-operation ChangeSet: staging, validated per-op amend, cherry-pick, atomic commit of the subset
    - Structured-row receipt: `intended / amended / skippedByHuman / applied` (with the values actually committed)
