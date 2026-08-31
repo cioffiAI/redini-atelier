@@ -27,6 +27,14 @@ const PROFILE = `${os.tmpdir()}${path.sep}atelier-chrome-profile`;
 const URL = 'http://localhost:5173/?clean=1';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The poster paints its 640x400 LOGICAL canvas in container-query units so it
+ * scales as one piece on narrow viewports: 120 logical px is 120/640 of the
+ * poster width. The operation vocabulary still speaks px everywhere else
+ * (schema, amendments, receipts), only the painted value is proportional.
+ */
+const cq = (v) => `${(v / 640) * 100}cqw`;
+
 function assert(cond, message) {
   if (!cond) throw new Error(`FAILED: ${message}`);
 }
@@ -204,8 +212,8 @@ await sleep(400);
 const ghostLogoLeft = await page.$eval('#flyer-ghost .logo-badge', (el) => el.style.left);
 const ghostLogoTop = await page.$eval('#flyer-ghost .logo-badge', (el) => el.style.top);
 console.log(`after typed move amend: ghost logo.left=${ghostLogoLeft}, logo.top=${ghostLogoTop}`);
-assert(ghostLogoLeft === '120px', `ghost must track the amended x, got ${ghostLogoLeft}`);
-assert(ghostLogoTop === '90px', `ghost must track the amended y, got ${ghostLogoTop}`);
+assert(ghostLogoLeft === cq(120), `ghost must track the amended x, got ${ghostLogoLeft}`);
+assert(ghostLogoTop === cq(90), `ghost must track the amended y, got ${ghostLogoTop}`);
 
 // ---------- (7) skip op-2 (background) via its checkbox → ghost reflects it ----------
 const checkboxes = await page.$$('.tx-card .tx-op input[type="checkbox"]');
@@ -245,8 +253,8 @@ console.log(`after commit: chip=${chip}, title="${flyerTitle}", bg=${flyerBg}, l
 assert(chip === 'Committed', `chip should be "Committed", got "${chip}"`);
 assert(flyerTitle === 'Amended Title', `amended title must be applied, got "${flyerTitle}"`);
 assert(flyerBg === 'rgb(255, 253, 248)', `skipped background must be UNCHANGED, got ${flyerBg}`);
-assert(logoLeft === '120px', `amended move x must be applied, logo.left=${logoLeft}`);
-assert(logoTop === '90px', `amended move y must be applied, logo.top=${logoTop}`);
+assert(logoLeft === cq(120), `amended move x must be applied, logo.left=${logoLeft}`);
+assert(logoTop === cq(90), `amended move y must be applied, logo.top=${logoTop}`);
 assert(!previewingAfterCommit, '#flyer-wrap must NOT be previewing after commit');
 assert(flyerVisibilityAfterCommit !== 'hidden', `#flyer must be visible again after commit, visibility="${flyerVisibilityAfterCommit}"`);
 // The canvas status line reflects the real decision.
@@ -304,8 +312,8 @@ let redoDisabled = await page.$eval('#redo-btn', (el) => el.disabled);
 chip = await page.$eval('.tx-card .tx-chip', (el) => el.textContent);
 console.log(`after undo: title="${undoneTitle}", bg=${undoneBg}, logo.left=${undoneLeft}, logo.top=${undoneTop}, chip=${chip}, undo-btn.disabled=${undoDisabled}, redo-btn.disabled=${redoDisabled}`);
 assert(undoneTitle === 'Spring Market on Main Street', `undo must restore the original title, got "${undoneTitle}"`);
-assert(undoneLeft === '500px', `undo must restore the original logo position, got ${undoneLeft}`);
-assert(undoneTop === '40px', `undo must restore the original logo top, got ${undoneTop}`);
+assert(undoneLeft === cq(500), `undo must restore the original logo position, got ${undoneLeft}`);
+assert(undoneTop === cq(40), `undo must restore the original logo top, got ${undoneTop}`);
 assert(undoneBg === 'rgb(255, 253, 248)', `undo must restore the original background, got ${undoneBg}`);
 assert(chip === 'Undone', `after undo the card chip should be "Undone", got "${chip}"`);
 const canvasStatusAfterUndo = await page.$eval('#canvas-status', (el) => el.textContent);
@@ -329,8 +337,8 @@ redoDisabled = await page.$eval('#redo-btn', (el) => el.disabled);
 chip = await page.$eval('.tx-card .tx-chip', (el) => el.textContent);
 console.log(`after redo: title="${redoneTitle}", bg=${redoneBg}, logo.left=${redoneLeft}, logo.top=${redoneTop}, chip=${chip}, undo-btn.disabled=${undoDisabled}, redo-btn.disabled=${redoDisabled}`);
 assert(redoneTitle === 'Amended Title', `redo must restore the amended title, got "${redoneTitle}"`);
-assert(redoneLeft === '120px', `redo must restore the amended move x, got ${redoneLeft}`);
-assert(redoneTop === '90px', `redo must restore the amended move y, got ${redoneTop}`);
+assert(redoneLeft === cq(120), `redo must restore the amended move x, got ${redoneLeft}`);
+assert(redoneTop === cq(90), `redo must restore the amended move y, got ${redoneTop}`);
 assert(redoneBg === 'rgb(255, 253, 248)', `the skipped background must stay UNCHANGED across redo, got ${redoneBg}`);
 assert(chip === 'Committed', `after redo the chip should be "Committed" again, got "${chip}"`);
 const canvasStatusAfterRedo = await page.$eval('#canvas-status', (el) => el.textContent);
